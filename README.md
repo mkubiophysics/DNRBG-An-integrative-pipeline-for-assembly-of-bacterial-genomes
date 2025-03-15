@@ -39,10 +39,11 @@ BUSCO Available at https://busco.ezlab.org/
 
 **USAGE**
 
-./dnrgb.sh read1.fastq read2.fastq 
+`./dnrgb.sh read1.fastq read2.fastq` 
+
 where fastq_1 and fastq_2 are raw sequences, paired-end read one and two, respectively.
 
-Docker To install docker you can see https://docs.docker.com/engine/install/ubuntu/. To use docker please use pull command docker pull somil131/dnrgb_genome_assembly:latest.
+Docker To install docker you can see https://docs.docker.com/engine/install/ubuntu/. To use docker please use pull command `docker pull mkulab/dnrgb:latest`
 
 **Docker Command**
 
@@ -50,4 +51,4 @@ please make sure that your reference genome directory is named as reference_geno
 
 You can use the command as mentioned below:-
 
-docker run -it -v $(pwd):/data -v /Path/to/reference_genome:/data/reference_genome somil131/dnrgb_genome_assembly:latest /data/path/to/Your_files_1.fastq /data/path/to/Your_files_2.fastq
+`docker run -it -v $(pwd):/data -v /Path/to/reference_genome:/data/reference_genome somil131/dnrgb_genome_assembly:latest /data/path/to/Your_files_1.fastq /data/path/to/Your_files_2.fastq`
