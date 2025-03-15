@@ -9,11 +9,11 @@ This pipeline is used for de-novo reference-guided assembly, which operates in t
 
 3) Reference-based scaffolding: Reference-based scaffolding is conducted.
 
-*Installation*
+**Installation**
 
 This pipeline is available as a LINUX executable.**
 
-*Dependencies*
+**Dependencies**
 
 This pipeline requires various dependencies.
 
@@ -37,14 +37,14 @@ AlignGraph Available at https://bowtie-bio.sourceforge.net/bowtie2/manual.shtml
 
 BUSCO Available at https://busco.ezlab.org/
 
-*USAGE*
+**USAGE**
 
 ./dnrgb.sh read1.fastq read2.fastq 
 where fastq_1 and fastq_2 are raw sequences, paired-end read one and two, respectively.
 
 Docker To install docker you can see https://docs.docker.com/engine/install/ubuntu/. To use docker please use pull command docker pull somil131/dnrgb_genome_assembly:latest.
 
-*Docker Command*
+**Docker Command**
 
 please make sure that your reference genome directory is named as reference_genome.
 
