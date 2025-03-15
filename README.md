@@ -39,9 +39,13 @@ BUSCO Available at https://busco.ezlab.org/
 
 **USAGE**
 
+**For LINUX**
+
 `./dnrgb.sh read1.fastq read2.fastq` 
 
 where fastq_1 and fastq_2 are raw sequences, paired-end read one and two, respectively.
+
+**Install Docker**
 
 Docker To install docker you can see https://docs.docker.com/engine/install/ubuntu/. To use docker please use pull command `docker pull mkulab/dnrgb:latest`
 
@@ -52,3 +56,10 @@ please make sure that your reference genome directory is named as reference_geno
 You can use the command as mentioned below:-
 
 `docker run -it -v $(pwd):/data -v /Path/to/reference_genome:/data/reference_genome mkulab/dnrgb:latest /data/path/to/Your_files_1.fastq /data/path/to/Your_files_2.fastq`
+
+**Install nextflow***
+You can install nextflow avaible at https://www.nextflow.io/docs/latest/install.html
+
+`nextflow run dnrgb.nf --forward_read /path/to/forward.fastq  --reverse_read /path/to/reverse.fastq  --thread 4  --phred 33  --PATH_TO_ADAPTER_CONTAM_FILE /path/to/adapter/file --leading 3  --trailing 3 --slidingwindow 4:15  --minlength 36  --max_overlap 150  --assembler /path/to/skesa --reference_genome /path/to/reference/genome/dir --pad_read_path /path/to/pad_reads.py --distancelow 100 --distancehigh 1000 --outputDir1 fastqc_out --outputDir2 multiqc_out --outputDir3 trimmomatic_out --outputDir4 flash_out --outputDir5 unicycler_out --outputDir6 quast_out --outputDir7 plentyofbugs_out --outputDir8 bowtie2_out --outputDir9 reference_based_assembly --outputDir10 busco`
+
+You just need to provide required path and change parameters as required. You will not need to change this `--outputDir1 fastqc_out --outputDir2 multiqc_out --outputDir3 trimmomatic_out --outputDir4 flash_out --outputDir5 unicycler_out --outputDir6 quast_out --outputDir7 plentyofbugs_out --outputDir8 bowtie2_out --outputDir9 reference_based_assembly --outputDir10 busco` 
