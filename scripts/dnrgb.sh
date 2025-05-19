@@ -477,7 +477,7 @@ echo -e "${yellow} Please provide required input parameters for AlignGraph${rese
 read -rp "Please provide your input for parameter --distanceLow : "  distancelow
 read -rp "please provide your input for parameter --distancehigh : " distancehigh
 echo -e "${green} Running AlignGraph${reset}"
-AlignGraph --read1 padded_out1.fa --read2 padded_out2.fa --contig "$contigpath/contigs.fasta" --genome "$reference_genome" --distanceLow "$distancelow" --distanceHigh "$distancehigh" --extendedContig sample_extendedcontig.fasta --remainingContig sample_remainingcontig.fasta
+AlignGraph --read1 padded_out1.fa --read2 padded_out2.fa --contig "$assemblypath/assembly.fasta" --genome "$reference_genome" --distanceLow "$distancelow" --distanceHigh "$distancehigh" --extendedContig sample_extendedcontig.fasta --remainingContig sample_remainingcontig.fasta
 else
 echo "${red}please install AlignGraph or seqtk if already installed please make sure they are in you current path${reset}"
 fi
