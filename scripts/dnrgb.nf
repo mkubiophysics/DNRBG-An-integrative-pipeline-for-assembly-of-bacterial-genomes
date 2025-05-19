@@ -186,8 +186,8 @@ process bowtie2_build {
     script:
     """
     mkdir -p "${params.outputDir8}/bowtie2_index"
-    best_genome=\$(awk '{gsub(/reference_genome\\//, ""); print \$1}' "best_reference")
-    genome_file="${reference_genome}/\${best_genome}"
+    best_genome=\$(awk '{gsub(/.*\\//, ""); print \$1}' "best_reference")
+    genome_file="${params.reference_genome}/\${best_genome}"
     bowtie2-build -f "\$genome_file" "${params.outputDir8}/bowtie2_index/reference_index"
     """
 }
@@ -267,11 +267,12 @@ process AlignGraph {
     """
     mkdir -p "reference_based_assembly"
     echo "Contig file path: $contigs_file"
-    best_genome=\$(awk '{gsub(/reference_genome\\//, ""); print \$1}' "best_reference")
-    genome_file="${reference_genome}/\${best_genome}"
+    best_genome=\$(awk '{gsub(/.*\\//, ""); print \$1}' "best_reference")
+    genome_file="${params.reference_genome}/\${best_genome}" 
     AlignGraph --read1 "$padded_file1" --read2 "$padded_file2" --contig "$contigs_file" --genome "\$genome_file"  --distanceLow "$distancelow"  --distanceHigh "$distancehigh"  --extendedContig "reference_based_assembly/sample_extendedcontig.fasta" --remainingContig "reference_based_assembly/sample_remainingcontig.fasta"
     """
 }
+
 
 // Define the process for quast2 (final Quast)
 process quast2 {
