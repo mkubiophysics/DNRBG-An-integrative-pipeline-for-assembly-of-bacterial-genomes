@@ -303,7 +303,7 @@ process busco {
     script:
     """
     mkdir -p ${params.outputDir10}
-    busco -i ${extended_contigs} -o ${params.outputDir10} -l bacteria_odb10 --mode genome
+    busco -i ${extended_contigs} -o ${params.outputDir10} -l bacteria_odb10 --mode genome --cpu 8
     """
 }
 
