@@ -29,6 +29,9 @@ params.pad_read_path = 'path/to/your/pad_reads.py'
 params.distancelow = 100
 params.distancehigh = 1000
 
+// Define input parameters for quast2 (add this with your other params)
+params.minContigLength = 500 
+
 // Define output directories
 params.outputDir1 = "fastqc_out"
 params.outputDir2 = "multiqc_out"
@@ -163,7 +166,6 @@ process plentyofbugs {
 
     script:
     """
-    rm -rf ${params.outputDir7}
     plentyofbugs --assembler ${assembler} \
         -f ${trimmomatic_out}/output_1P.fq \
         -r ${trimmomatic_out}/output_2P.fq \
@@ -179,14 +181,13 @@ process bowtie2_build {
     path reference_genome
 
     output:
-    path output:
-    path"bowtie2_out/reference_index*", emit: bowtie2_index 
+    path "${params.outputDir8}/reference_index*", emit: bowtie2_index
 
     script:
     """
     mkdir -p ${params.outputDir8}
-    best_genome=\$(awk '{gsub(/.*\\//, ""); print \$1}' "best_reference")
-    genome_file="${params.reference_genome}/\${best_genome}" 
+    best_genome=\$(awk '{gsub(/.*\\//, ""); print \$1}' "${best_reference}")
+    genome_file="${reference_genome}/\${best_genome}"
     bowtie2-build -f "\${genome_file}" "${params.outputDir8}/reference_index"
     """
 }
@@ -202,13 +203,13 @@ process bowtie2 {
 
     script:
     """
-    mkdir -p bowtie2_out
+    mkdir -p ${params.outputDir8}
     indexPath=\$(find -L ${bowtie2_index} -type f -name '*.rev.1.bt2' | sed 's/\\.rev.1.bt2\$//')
     echo "Using index path: \${indexPath}"
     bowtie2 -x \${indexPath} \
             -1 ${trimmomatic_out}/output_1P.fq \
             -2 ${trimmomatic_out}/output_2P.fq \
-            -S "bowtie2_out/out.sam"  
+            -S "${params.outputDir8}/out.sam"
     """
 }
 
@@ -243,6 +244,7 @@ process pad_read {
 
     script:
     """
+    mkdir -p ${params.outputDir9}
     python ${pad_read_path} ${forward_fa} ${params.outputDir9}/padded_out1.fa 150
     python ${pad_read_path} ${reverse_fa} ${params.outputDir9}/padded_out2.fa 150
     """
@@ -265,15 +267,31 @@ process AlignGraph {
 
     script:
     """
-    best_genome=\$(awk '{gsub(/.*\\//, ""); print \$1}' "best_reference")
-    genome_file="${params.reference_genome}/\${best_genome}" 
-    AlignGraph --read1 ${padded_file1} --read2 ${padded_file2} \
-        --contig ${assembly_file} \
-        --genome "\${genome_file}" \
-        --distanceLow ${distancelow} \
-        --distanceHigh ${distancehigh} \
-        --extendedContig ${params.outputDir9}/sample_extendedcontig.fasta \
-        --remainingContig ${params.outputDir9}/sample_remainingcontig.fasta
+    # Create output directory
+    mkdir -p ${params.outputDir9}
+
+    # Resolve the genome file path properly
+    best_genome=\$(awk '{gsub(/.*\\//, ""); print \$1}' "${best_reference}")
+    genome_path="\$(readlink -f "${reference_genome}/\${best_genome}")"
+    
+    if [ ! -f "\${genome_path}" ]; then
+        echo "ERROR: Genome file not found at \${genome_path}"
+        echo "Tried to resolve: ${reference_genome}/\${best_genome}"
+        echo "Directory contents:"
+        ls -l "${reference_genome}"
+        exit 1
+    fi
+
+    echo "Using genome file: \${genome_path}"
+    AlignGraph \\
+        --read1 "${padded_file1}" \\
+        --read2 "${padded_file2}" \\
+        --contig "${assembly_file}" \\
+        --genome "\${genome_path}" \\
+        --distanceLow ${distancelow} \\
+        --distanceHigh ${distancehigh} \\
+        --extendedContig "${params.outputDir9}/sample_extendedcontig.fasta" \\
+        --remainingContig "${params.outputDir9}/sample_remainingcontig.fasta"
     """
 }
 
@@ -281,14 +299,23 @@ process AlignGraph {
 process quast2 {
     input:
     path extended_contigs
-
+    path remaining_contigs
+    val min_length
+ 
     output:
     path "${params.outputDir9}/quast_output", emit: quast2_out
 
     script:
     """
-    mkdir -p ${params.outputDir9}/quast_output
-    quast.py -o ${params.outputDir9}/quast_output ${extended_contigs}
+     mkdir -p ${params.outputDir9}/quast_output
+    
+    # Check if extended_contigs exists AND has at least one contig
+    if [[ -s "${extended_contigs}" ]] && grep -q ">" "${extended_contigs}"; then
+        quast.py -o ${params.outputDir9}/quast_output --min-contig ${min_length} "${extended_contigs}"
+    else
+        echo "WARNING: Using remaining_contigs (extended_contigs was empty/invalid)"
+        quast.py -o ${params.outputDir9}/quast_output --min-contig ${min_length} "${remaining_contigs}"
+    fi 
     """
 }
 
@@ -296,14 +323,23 @@ process quast2 {
 process busco {
     input:
     path extended_contigs
+    path remaining_contigs
 
     output:
     path "${params.outputDir10}", emit: busco_out
 
     script:
     """
-    mkdir -p ${params.outputDir10}
-    busco -i ${extended_contigs} -o ${params.outputDir10} -l bacteria_odb10 --mode genome --cpu 8
+    # Check if extended_contigs is usable (non-empty and valid FASTA)
+    if [[ -s "${extended_contigs}" ]] && grep -q ">" "${extended_contigs}"; then
+        INPUT="${extended_contigs}"
+    else
+        echo "WARNING: Using remaining_contigs (extended_contigs was empty/invalid)"
+        INPUT="${remaining_contigs}"
+    fi
+
+    # Run BUSCO on the selected input
+    busco -i "\$INPUT" -o ${params.outputDir10} -l bacteria_odb10 --mode genome --cpu 8  
     """
 }
 
@@ -378,8 +414,8 @@ workflow {
     )
     
     // Run quast2 for AlignGraph
-    quast2_ch = quast2(aligngraph_ch.extended_contigs)
+    quast2_ch = quast2(aligngraph_ch.extended_contigs, aligngraph_ch.remaining_contigs, params.minContigLength)
     
     // Run busco
-    busco_ch = busco(aligngraph_ch.extended_contigs)
+    busco_ch = busco(aligngraph_ch.extended_contigs, aligngraph_ch.remaining_contigs)
 }
