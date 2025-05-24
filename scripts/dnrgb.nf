@@ -319,27 +319,38 @@ process quast2 {
     """
 }
 
-// Define the process for BUSCO
 process busco {
+    // Simple process with direct BUSCO execution
+    cpus 4  // Sets default CPU count
+    
     input:
     path extended_contigs
     path remaining_contigs
 
     output:
-    path "${params.outputDir10}", emit: busco_out
+    path "busco_output/*", emit: busco_results
+    path "busco_output/short_summary.*.txt", emit: summary
 
     script:
     """
-    # Check if extended_contigs is usable (non-empty and valid FASTA)
+    # Select input file (extended contigs preferred)
     if [[ -s "${extended_contigs}" ]] && grep -q ">" "${extended_contigs}"; then
         INPUT="${extended_contigs}"
+        echo "Using extended contigs as input"
     else
-        echo "WARNING: Using remaining_contigs (extended_contigs was empty/invalid)"
         INPUT="${remaining_contigs}"
+        echo "Using remaining contigs as input"
+        [[ -s "\$INPUT" ]] || { echo "ERROR: No valid input files"; exit 1; }
     fi
 
-    # Run BUSCO on the selected input
-    busco -i "\$INPUT" -o ${params.outputDir10} -l bacteria_odb10 --mode genome --cpu 8  
+    # Run BUSCO
+    busco \\
+        -i "\$INPUT" \\
+        -o busco_output \\
+        -l bacteria_odb10 \\
+        -m genome \\
+        -c ${task.cpus} \\
+        --force
     """
 }
 
