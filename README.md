@@ -55,7 +55,7 @@ please make sure that your reference genome directory is named as reference_geno
 
 You can use the command as mentioned below:-
 
-`docker run -it -v $(pwd):/data -v /Path/to/reference_genome:/data/reference_genome mkulab/dnrbg:latest /data/path/to/Your_files_1.fastq /data/path/to/Your_files_2.fastq`
+`docker run -it -v $(pwd):/data -v /Path/to/reference_genome:/data/reference_genome somil131/dnrbg_latest:v1.0 /data/path/to/Your_files_1.fastq /data/path/to/Your_files_2.fastq`
 
 **Install nextflow***
 You can install nextflow avaible at https://www.nextflow.io/docs/latest/install.html
