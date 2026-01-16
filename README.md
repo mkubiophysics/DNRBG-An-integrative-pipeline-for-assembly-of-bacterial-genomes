@@ -47,7 +47,7 @@ where fastq_1 and fastq_2 are raw sequences, paired-end read one and two, respec
 
 **Install Docker**
 
-Docker To install docker you can see https://docs.docker.com/engine/install/ubuntu/. To use docker please use pull command `docker pull mkulab/dnrgb:latest`
+Docker To install docker you can see https://docs.docker.com/engine/install/ubuntu/. To use docker please use pull command `docker pull somil131/dnrbg_latest:v1.0`
 
 **Docker Command**
 
