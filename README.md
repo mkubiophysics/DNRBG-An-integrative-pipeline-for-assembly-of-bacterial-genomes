@@ -60,6 +60,7 @@ You can use the command as mentioned below:-
 **Install nextflow***
 You can install nextflow avaible at https://www.nextflow.io/docs/latest/install.html
 
+**nextflow version 25.04.2.5947**
 `nextflow run dnrbg.nf --forward_read /path/to/forward.fastq  --reverse_read /path/to/reverse.fastq  --thread 4  --phred 33  --PATH_TO_ADAPTER_CONTAM_FILE /path/to/adapter/file --leading 3  --trailing 3 --slidingwindow 4:15  --minlength 36  --max_overlap 150  --assembler /path/to/skesa --reference_genome /path/to/reference/genome/dir --pad_read_path /path/to/pad_reads.py --distancelow 100 --distancehigh 1000 --outputDir1 fastqc_out --outputDir2 multiqc_out --outputDir3 trimmomatic_out --outputDir4 flash_out --outputDir5 unicycler_out --outputDir6 quast_out --outputDir7 plentyofbugs_out --outputDir8 bowtie2_out --outputDir9 reference_based_assembly --outputDir10 busco`
 
 You just need to provide required path and change parameters as required. You will not need to change this `--outputDir1 fastqc_out --outputDir2 multiqc_out --outputDir3 trimmomatic_out --outputDir4 flash_out --outputDir5 unicycler_out --outputDir6 quast_out --outputDir7 plentyofbugs_out --outputDir8 bowtie2_out --outputDir9 reference_based_assembly --outputDir10 busco` 
