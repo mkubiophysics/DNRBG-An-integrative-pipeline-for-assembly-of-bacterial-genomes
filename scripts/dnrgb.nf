@@ -30,7 +30,7 @@ params.distancelow = 100
 params.distancehigh = 1000
 
 // Define input parameters for quast2 (add this with your other params)
-params.minContigLength = 500 
+params.minContigLength = 500
 
 // Define output directories
 params.outputDir1 = "fastqc_out"
@@ -250,7 +250,7 @@ process pad_read {
     """
 }
 
-// Define the process for AlignGraph 
+// Define the process for AlignGraph
 process AlignGraph {
     input:
     path best_reference
@@ -273,7 +273,7 @@ process AlignGraph {
     # Resolve the genome file path properly
     best_genome=\$(awk '{gsub(/.*\\//, ""); print \$1}' "${best_reference}")
     genome_path="\$(readlink -f "${reference_genome}/\${best_genome}")"
-    
+
     if [ ! -f "\${genome_path}" ]; then
         echo "ERROR: Genome file not found at \${genome_path}"
         echo "Tried to resolve: ${reference_genome}/\${best_genome}"
@@ -301,28 +301,28 @@ process quast2 {
     path extended_contigs
     path remaining_contigs
     val min_length
- 
+
     output:
     path "${params.outputDir9}/quast_output", emit: quast2_out
 
     script:
     """
      mkdir -p ${params.outputDir9}/quast_output
-    
+
     # Check if extended_contigs exists AND has at least one contig
     if [[ -s "${extended_contigs}" ]] && grep -q ">" "${extended_contigs}"; then
         quast.py -o ${params.outputDir9}/quast_output --min-contig ${min_length} "${extended_contigs}"
     else
         echo "WARNING: Using remaining_contigs (extended_contigs was empty/invalid)"
         quast.py -o ${params.outputDir9}/quast_output --min-contig ${min_length} "${remaining_contigs}"
-    fi 
+    fi
     """
 }
 
 process busco {
     // Simple process with direct BUSCO execution
     cpus 4  // Sets default CPU count
-    
+
     input:
     path extended_contigs
     path remaining_contigs
@@ -357,62 +357,62 @@ process busco {
 workflow {
     // Run fastqc and get the output
     fastqc_ch = fastqc(params.forward_read, params.reverse_read)
-    
+
     // Run MultiQC on the FastQC output directory
     multiqc_ch = multiqc(fastqc_ch.fastqc_out)
-    
+
     // Run trimmomatic
     trimmomatic_ch = trimmomatic(
-        params.forward_read, 
-        params.reverse_read, 
-        params.thread, 
-        params.phred, 
-        params.PATH_TO_ADAPTER_CONTAM_FILE, 
-        params.leading, 
-        params.trailing, 
-        params.slidingwindow, 
+        params.forward_read,
+        params.reverse_read,
+        params.thread,
+        params.phred,
+        params.PATH_TO_ADAPTER_CONTAM_FILE,
+        params.leading,
+        params.trailing,
+        params.slidingwindow,
         params.minlength
     )
-    
+
     // Run flash
     flash_ch = flash(trimmomatic_ch.trimmomatic_out, params.max_overlap)
-    
+
     // Run unicycler
     unicycler_ch = unicycler(trimmomatic_ch.trimmomatic_out, flash_ch.flash_out)
-    
+
     // Run quast
     quast_ch = quast(unicycler_ch.assembly_file)
-    
+
     // Run plentyofbugs
     plentyofbugs_ch = plentyofbugs(
-        quast_ch.quast_out, 
-        params.assembler, 
-        params.reference_genome, 
+        quast_ch.quast_out,
+        params.assembler,
+        params.reference_genome,
         trimmomatic_ch.trimmomatic_out
     )
-    
+
     // Run bowtie2_build process
     bowtie2_build_ch = bowtie2_build(
-        plentyofbugs_ch.best_reference, 
+        plentyofbugs_ch.best_reference,
         params.reference_genome
     )
-    
+
     // Run bowtie2 process
     bowtie2_ch = bowtie2(
-        bowtie2_build_ch.bowtie2_index, 
+        bowtie2_build_ch.bowtie2_index,
         trimmomatic_ch.trimmomatic_out
     )
-    
+
     // Run seqtk
     seqtk_ch = seqtk(bowtie2_ch.sam_file, trimmomatic_ch.trimmomatic_out)
-    
+
     // Run the pad_read process
     pad_read_ch = pad_read(
-        seqtk_ch.forward_fa, 
-        seqtk_ch.reverse_fa, 
+        seqtk_ch.forward_fa,
+        seqtk_ch.reverse_fa,
         params.pad_read_path
     )
-    
+
     // Run AlignGraph
     aligngraph_ch = AlignGraph(
         plentyofbugs_ch.best_reference,
@@ -423,10 +423,9 @@ workflow {
         params.distancelow,
         params.distancehigh
     )
-    
+
     // Run quast2 for AlignGraph
     quast2_ch = quast2(aligngraph_ch.extended_contigs, aligngraph_ch.remaining_contigs, params.minContigLength)
-    
+
     // Run busco
     busco_ch = busco(aligngraph_ch.extended_contigs, aligngraph_ch.remaining_contigs)
-}
