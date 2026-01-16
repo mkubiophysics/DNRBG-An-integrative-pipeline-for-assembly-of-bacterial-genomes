@@ -41,7 +41,7 @@ BUSCO Available at https://busco.ezlab.org/
 
 **For LINUX**
 
-`./dnrgb.sh read1.fastq read2.fastq` 
+`./dnrbg.sh read1.fastq read2.fastq` 
 
 where fastq_1 and fastq_2 are raw sequences, paired-end read one and two, respectively.
 
