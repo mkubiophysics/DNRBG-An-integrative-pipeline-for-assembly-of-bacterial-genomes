@@ -1,993 +1,929 @@
-#!/usr/bin/env nextflow
-
-nextflow.enable.dsl=2
-
-// Define parameters read1 and read2
-params.forward_read = null
-params.reverse_read = null
-
-// Define parameters for trimmomatic
-params.thread = 4
-params.phred = 33
-params.PATH_TO_ADAPTER_CONTAM_FILE = 'Path/to/your/adapter/file'
-params.leading = 3
-params.trailing = 3
-params.slidingwindow = '4:15'
-params.minlength = 36
-
-// Define parameters for flash
-params.max_overlap = 150
-
-// Define parameters for plentyofbugs
-params.assembler = 'path/to/skesa'
-params.reference_genome = 'path/to/your/reference/genome/dir'
-
-// Define input parameter path for pad reads
-params.pad_read_path = 'path/to/your/pad_reads.py'
-
-// Define input parameters for AlignGraph
-params.distancelow = 100
-params.distancehigh = 1000
-
-// Define input parameters for quast2 (add this with your other params)
-params.minContigLength = 500
-
-// Define output directories
-params.outputDir1 = "fastqc_out"
-params.outputDir2 = "multiqc_out"
-params.outputDir3 = "trimmomatic_out"
-params.outputDir4 = "flash_out"
-params.outputDir5 = "unicycler_out"
-params.outputDir6 = "quast_out"
-params.outputDir7 = "plentyofbugs_out"
-params.outputDir8 = "bowtie2_out"
-params.outputDir9 = "reference_based_assembly"
-params.outputDir10 = "busco_out"
-
-// Define the first process (FastQC)
-process fastqc {
-    input:
-    path forward_read
-    path reverse_read
-
-    output:
-    path "${params.outputDir1}", emit: fastqc_out
-
-    script:
-    """
-    mkdir -p ${params.outputDir1}
-    fastqc -o ${params.outputDir1} -f fastq "$forward_read" "$reverse_read"
-    """
-}
-
-// Define the second process (MultiQC)
-process multiqc {
-    input:
-    path fastqc_out
-
-    output:
-    path "${params.outputDir2}", emit: multiqc_out
-
-    script:
-    """
-    mkdir -p ${params.outputDir2}
-    multiqc ${fastqc_out} -o ${params.outputDir2}
-    """
-}
-
-// Define the third process (Trimmomatic)
-process trimmomatic {
-    input:
-    path forward_read
-    path reverse_read
-    val thread
-    val phred
-    path PATH_TO_ADAPTER_CONTAM_FILE
-    val leading
-    val trailing
-    val slidingwindow
-    val minlength
-
-    output:
-    path "${params.outputDir3}", emit: trimmomatic_out
-
-    script:
-    """
-    mkdir -p ${params.outputDir3}
-    trimmomatic PE -threads ${thread} -phred${phred} "$forward_read" "$reverse_read" \
-        ${params.outputDir3}/output_1P.fq ${params.outputDir3}/output_1U.fq \
-        ${params.outputDir3}/output_2P.fq ${params.outputDir3}/output_2U.fq \
-        ILLUMINACLIP:${PATH_TO_ADAPTER_CONTAM_FILE}:2:30:10 LEADING:${leading} \
-        TRAILING:${trailing} SLIDINGWINDOW:${slidingwindow} MINLEN:${minlength}
-    """
-}
-
-// Define the fourth process (FLASH)
-process flash {
-    input:
-    path trimmomatic_out
-    val max_overlap
-
-    output:
-    path "${params.outputDir4}", emit: flash_out
-
-    script:
-    """
-    mkdir -p ${params.outputDir4}
-    flash --max-overlap ${max_overlap} \
-        ${trimmomatic_out}/output_1P.fq ${trimmomatic_out}/output_2P.fq \
-        -d ${params.outputDir4}
-    """
-}
-
-// Define the fifth process (Unicycler)
-process unicycler {
-    input:
-    path trimmomatic_out
-    path flash_out
-
-    output:
-    path "${params.outputDir5}/assembly.fasta", emit: assembly_file
-
-    script:
-    """
-    mkdir -p ${params.outputDir5}
-    unicycler -1 ${trimmomatic_out}/output_1P.fq -2 ${trimmomatic_out}/output_2P.fq \
-        -s ${flash_out}/out.extendedFrags.fastq -o ${params.outputDir5}
-    """
-}
-
-// Define the sixth process (Quast)
-process quast {
-    input:
-    path assembly_file
-
-    output:
-    path "${params.outputDir6}", emit: quast_out
-
-    script:
-    """
-    mkdir -p ${params.outputDir6}
-    quast.py -o ${params.outputDir6} ${assembly_file}
-    """
-}
-
-// Define plentyofbugs
-process plentyofbugs {
-    input:
-    path quast_out
-    path assembler
-    path reference_genome
-    path trimmomatic_out
-
-    output:
-    path "${params.outputDir7}/best_reference", emit: best_reference
-    path "${params.outputDir7}/assembly/contigs.fasta", emit: contigs_file
-
-    script:
-    """
-    plentyofbugs --assembler ${assembler} \
-        -f ${trimmomatic_out}/output_1P.fq \
-        -r ${trimmomatic_out}/output_2P.fq \
-        -g ${reference_genome} \
-        -o ${params.outputDir7}
-    """
-}
-
-// Define process bowtie2_build
-process bowtie2_build {
-    input:
-    path best_reference
-    path reference_genome
-
-    output:
-    path "${params.outputDir8}/reference_index*", emit: bowtie2_index
-
-    script:
-    """
-    mkdir -p ${params.outputDir8}
-    best_genome=\$(awk '{gsub(/.*\\//, ""); print \$1}' "${best_reference}")
-    genome_file="${reference_genome}/\${best_genome}"
-    bowtie2-build -f "\${genome_file}" "${params.outputDir8}/reference_index"
-    """
-}
-
-// Define process bowtie2
-process bowtie2 {
-    input:
-    path bowtie2_index
-    path trimmomatic_out
-
-    output:
-    path "${params.outputDir8}/out.sam", emit: sam_file
-
-    script:
-    """
-    mkdir -p ${params.outputDir8}
-    indexPath=\$(find -L ${bowtie2_index} -type f -name '*.rev.1.bt2' | sed 's/\\.rev.1.bt2\$//')
-    echo "Using index path: \${indexPath}"
-    bowtie2 -x \${indexPath} \
-            -1 ${trimmomatic_out}/output_1P.fq \
-            -2 ${trimmomatic_out}/output_2P.fq \
-            -S "${params.outputDir8}/out.sam"
-    """
-}
-
-// Define the process for seqtk
-process seqtk {
-    input:
-    path sam_file
-    path trimmomatic_out
-
-    output:
-    path "${params.outputDir9}/paired_forward_1.fa", emit: forward_fa
-    path "${params.outputDir9}/paired_forward_2.fa", emit: reverse_fa
-
-    script:
-    """
-    mkdir -p ${params.outputDir9}
-    seqtk seq -A ${trimmomatic_out}/output_1P.fq > ${params.outputDir9}/paired_forward_1.fa
-    seqtk seq -A ${trimmomatic_out}/output_2P.fq > ${params.outputDir9}/paired_forward_2.fa
-    """
-}
-
-// Define process for pad read
-process pad_read {
-    input:
-    path forward_fa
-    path reverse_fa
-    path pad_read_path
-
-    output:
-    path "${params.outputDir9}/padded_out1.fa", emit: padded_file1
-    path "${params.outputDir9}/padded_out2.fa", emit: padded_file2
-
-    script:
-    """
-    mkdir -p ${params.outputDir9}
-    python ${pad_read_path} ${forward_fa} ${params.outputDir9}/padded_out1.fa 150
-    python ${pad_read_path} ${reverse_fa} ${params.outputDir9}/padded_out2.fa 150
-    """
-}
-
-// Define the process for AlignGraph
-process AlignGraph {
-    input:
-    path best_reference
-    path reference_genome
-    path padded_file1
-    path padded_file2
-    path assembly_file
-    val distancelow
-    val distancehigh
-
-    output:
-    path "${params.outputDir9}/sample_extendedcontig.fasta", emit: extended_contigs
-    path "${params.outputDir9}/sample_remainingcontig.fasta", emit: remaining_contigs
-
-    script:
-    """
-    # Create output directory
-    mkdir -p ${params.outputDir9}
-
-    # Resolve the genome file path properly
-    best_genome=\$(awk '{gsub(/.*\\//, ""); print \$1}' "${best_reference}")
-    genome_path="\$(readlink -f "${reference_genome}/\${best_genome}")"
-
-    if [ ! -f "\${genome_path}" ]; then
-        echo "ERROR: Genome file not found at \${genome_path}"
-        echo "Tried to resolve: ${reference_genome}/\${best_genome}"
-        echo "Directory contents:"
-        ls -l "${reference_genome}"
-        exit 1
-    fi
-
-    echo "Using genome file: \${genome_path}"
-    AlignGraph \\
-        --read1 "${padded_file1}" \\
-        --read2 "${padded_file2}" \\
-        --contig "${assembly_file}" \\
-        --genome "\${genome_path}" \\
-        --distanceLow ${distancelow} \\
-        --distanceHigh ${distancehigh} \\
-        --extendedContig "${params.outputDir9}/sample_extendedcontig.fasta" \\
-        --remainingContig "${params.outputDir9}/sample_remainingcontig.fasta"
-    """
-}
-
-// Define the process for quast2 (final Quast)
-process quast2 {
-    input:
-    path extended_contigs
-    path remaining_contigs
-    val min_length
-
-    output:
-    path "${params.outputDir9}/quast_output", emit: quast2_out
-
-    script:
-    """
-     mkdir -p ${params.outputDir9}/quast_output
-
-    # Check if extended_contigs exists AND has at least one contig
-    if [[ -s "${extended_contigs}" ]] && grep -q ">" "${extended_contigs}"; then
-        quast.py -o ${params.outputDir9}/quast_output --min-contig ${min_length} "${extended_contigs}"
-    else
-        echo "WARNING: Using remaining_contigs (extended_contigs was empty/invalid)"
-        quast.py -o ${params.outputDir9}/quast_output --min-contig ${min_length} "${remaining_contigs}"
-    fi
-    """
-}
-
-process busco {
-    // Simple process with direct BUSCO execution
-    cpus 4  // Sets default CPU count
-
-    input:
-    path extended_contigs
-    path remaining_contigs
-
-    output:
-    path "busco_output/*", emit: busco_results
-    path "busco_output/short_summary.*.txt", emit: summary
-
-    script:
-    """
-    # Select input file (extended contigs preferred)
-    if [[ -s "${extended_contigs}" ]] && grep -q ">" "${extended_contigs}"; then
-        INPUT="${extended_contigs}"
-        echo "Using extended contigs as input"
-    else
-        INPUT="${remaining_contigs}"
-        echo "Using remaining contigs as input"
-        [[ -s "\$INPUT" ]] || { echo "ERROR: No valid input files"; exit 1; }
-    fi
-
-    # Run BUSCO
-    busco \\
-        -i "\$INPUT" \\
-        -o busco_output \\
-        -l bacteria_odb10 \\
-        -m genome \\
-        -c ${task.cpus} \\
-        --force
-    """
-}
-
-workflow {
-    // Run fastqc and get the output
-    fastqc_ch = fastqc(params.forward_read, params.reverse_read)
-
-    // Run MultiQC on the FastQC output directory
-    multiqc_ch = multiqc(fastqc_ch.fastqc_out)
-
-    // Run trimmomatic
-    trimmomatic_ch = trimmomatic(
-        params.forward_read,
-        params.reverse_read,
-        params.thread,
-        params.phred,
-        params.PATH_TO_ADAPTER_CONTAM_FILE,
-        params.leading,
-        params.trailing,
-        params.slidingwindow,
-        params.minlength
-    )
-
-    // Run flash
-    flash_ch = flash(trimmomatic_ch.trimmomatic_out, params.max_overlap)
-
-    // Run unicycler
-    unicycler_ch = unicycler(trimmomatic_ch.trimmomatic_out, flash_ch.flash_out)
-
-    // Run quast
-    quast_ch = quast(unicycler_ch.assembly_file)
-
-    // Run plentyofbugs
-    plentyofbugs_ch = plentyofbugs(
-        quast_ch.quast_out,
-        params.assembler,
-        params.reference_genome,
-        trimmomatic_ch.trimmomatic_out
-    )
-
-    // Run bowtie2_build process
-    bowtie2_build_ch = bowtie2_build(
-        plentyofbugs_ch.best_reference,
-        params.reference_genome
-    )
-
-    // Run bowtie2 process
-    bowtie2_ch = bowtie2(
-        bowtie2_build_ch.bowtie2_index,
-        trimmomatic_ch.trimmomatic_out
-    )
-
-    // Run seqtk
-    seqtk_ch = seqtk(bowtie2_ch.sam_file, trimmomatic_ch.trimmomatic_out)
-
-    // Run the pad_read process
-    pad_read_ch = pad_read(
-        seqtk_ch.forward_fa,
-        seqtk_ch.reverse_fa,
-        params.pad_read_path
-    )
-
-    // Run AlignGraph
-    aligngraph_ch = AlignGraph(
-        plentyofbugs_ch.best_reference,
-        params.reference_genome,
-        pad_read_ch.padded_file1,
-        pad_read_ch.padded_file2,
-        unicycler_ch.assembly_file,
-        params.distancelow,
-        params.distancehigh
-    )
-
-    // Run quast2 for AlignGraph
-    quast2_ch = quast2(aligngraph_ch.extended_contigs, aligngraph_ch.remaining_contigs, params.minContigLength)
-
-    // Run busco
-    busco_ch = busco(aligngraph_ch.extended_contigs, aligngraph_ch.remaining_contigs)
-}
-(base) manish_kumar@DESKTOP-G29M48F:~/scripts/DNRBG$ ls -lhrt
-total 60K
--rwxr-xr-x 1 manish_kumar manish_kumar  12K Jan 16 06:32 dnrgb_new_deep.nf
--rwxr-xr-x 1 manish_kumar manish_kumar  26K Jan 16 06:33 dnrgb.sh
--rwxr-xr-x 1 manish_kumar manish_kumar  701 Jan 16 06:33 pad_reads_1.py
--rwxr-xr-x 1 manish_kumar manish_kumar  205 Jan 16 06:33 env.yml
--rw-r--r-- 1 manish_kumar manish_kumar 9.8K Jan 16 06:39 Dockerfile
-(base) manish_kumar@DESKTOP-G29M48F:~/scripts/DNRBG$ cat dnrgb.sh
-#!/bin/bash
-###############################################
-#colour coding format for echo
-green='\033[0;32m'  #colour coding for green
-red='\033[0;31m'    #colour coding for red
-yellow='\033[1;33m' #colour coding for yellow
-reset='\033[0m'     #reset colour
-##############################################
+#!/usr/bin/env bash
+#
+# dnrbg_1.sh — integrative genome assembly pipeline (with resume + fallback)
+#
+# Phase 1: FastQC -> MultiQC -> Trimmomatic -> FLASH -> Unicycler -> QUAST
+# Phase 2: plentyofbugs -> Bowtie2 -> AlignGraph -> QUAST -> BUSCO
+#
+# Resume:
+#   ./dnrbg_1.sh --resume <WORK_DIR> [other flags]
+#
+# AlignGraph fallback:
+#   If sample_extendedcontig.fasta is empty (0 bytes), the pipeline
+#   automatically uses sample_remainingcontig.fasta for QUAST and BUSCO.
+#
+set -euo pipefail
+
+###############################################################################
+# Colours
+###############################################################################
+if [[ -t 1 ]]; then
+    green=$'\033[0;32m'
+    red=$'\033[0;31m'
+    yellow=$'\033[1;33m'
+    blue=$'\033[0;34m'
+    reset=$'\033[0m'
+else
+    green=""; red=""; yellow=""; blue=""; reset=""
+fi
+
+log()   { echo -e "${green}[INFO]${reset}  $*"; }
+warn()  { echo -e "${yellow}[WARN]${reset}  $*" >&2; }
+error() { echo -e "${red}[ERROR]${reset} $*" >&2; }
+die()   { error "$*"; exit 1; }
+
+###############################################################################
+# Defaults
+###############################################################################
+THREADS=4
+PHRED=33
+ADAPTER_FILE=""
+LEADING=3
+TRAILING=3
+SLIDINGWINDOW="4:15"
+MINLEN=36
+
+MAX_OVERLAP=10
+ASSEMBLER="skesa"
+BUSCO_LINEAGE="bacteria_odb10"
+PAD_SCRIPT=""
+PAD_READ_LEN=150
+DIST_LOW=200
+DIST_HIGH=1000
+REFERENCE_DIR=""
+SKIP_PHASE2=0
+ALIGN_THRESHOLD=75
+FRESH=0
+RESUME_DIR=""
+
+FORWARD_READ=""
+REVERSE_READ=""
+
+# Set inside main() AFTER parse_args so --resume takes effect
+WORK_DIR=""
+CHECKPOINT_DIR=""
+LOG_FILE=""
+REPORT_FILE=""
+CONFIG_FILE=""
+CANDIDATE_REFS=()
+
+# Set during execution
+ALIGNGRAPH_STATUS="not run"
+ALIGNGRAPH_USED_FILE=""
+
+###############################################################################
 # Help
-##############################################
-Help()
-{
-# Colors for formatting
-green='\033[0;32m'
-yellow='\033[1;33m'
-reset='\033[0m'
-# Display Help
-echo -e "${green}     This is an integrative genome assembly pipeline.${reset}"
-echo -e "${yellow}    Usage:${reset}"
-echo -e "${yellow}    ./genome_assembly.sh read_1 read_2${reset}"
-echo -e "${yellow}    where:${reset}"
-echo -e "${yellow}    read_1 - Path to the first input read file (fastq format)${reset}"
-echo -e "${yellow}    read_2 - Path to the second input read file (fastq format)${reset}"
-echo -e "${green}     Please ensure that the input files are in fastq format.${reset}"
+###############################################################################
+usage() {
+    cat <<EOF
+${green}Integrative genome assembly pipeline${reset}
+
+${yellow}Usage:${reset}
+  $(basename "$0") -1 <R1.fastq> -2 <R2.fastq> -g <REF_DIR> [options]
+  $(basename "$0") --resume <WORK_DIR> [options]
+  $(basename "$0") --fresh -1 <R1.fastq> -2 <R2.fastq> [options]
+
+${yellow}Resume:${reset}
+  --resume DIR   Resume a previous run (skip completed steps)
+  --fresh        Force a new run
+
+${yellow}Required:${reset}
+  -1 FILE        Path to forward reads (FASTQ)
+  -2 FILE        Path to reverse reads (FASTQ)
+  -g DIR         Directory of candidate reference FASTA files
+
+${yellow}Trimmomatic:${reset}
+  -T INT         Threads                       (default: $THREADS)
+  -P INT         Phred (33|64)                 (default: $PHRED)
+  -A FILE        Adapter FASTA
+  -L INT         LEADING                       (default: $LEADING)
+  -G INT         TRAILING                      (default: $TRAILING)
+  -W STR         SLIDINGWINDOW                 (default: $SLIDINGWINDOW)
+  -M INT         MINLEN                        (default: $MINLEN)
+
+${yellow}Other tools:${reset}
+  -o INT         FLASH max-overlap             (default: $MAX_OVERLAP)
+  -X STR         Assembler (skesa|spades)      (default: $ASSEMBLER)
+  -b STR         BUSCO lineage                 (default: $BUSCO_LINEAGE)
+  -C FILE        Path to pad_reads_1.py
+  -R INT         Read length for padding       (default: $PAD_READ_LEN)
+  -d INT         AlignGraph --distanceLow      (default: $DIST_LOW)
+  -D INT         AlignGraph --distanceHigh     (default: $DIST_HIGH)
+  -m INT         Alignment-rate threshold %    (default: $ALIGN_THRESHOLD)
+  -S             Skip Phase 2
+  -h             Show this help
+EOF
 }
-###############################################
-#########pre procressing step one ##############
-#get working directory
-current_dir=$(pwd)
-#input files that is raw reads in fastq format
-forward_read=$1
-reverse_read=$2
-#check if the arguments are given
-if [ "$#" -eq 2 ]; then # check for two arguments
-echo -e "${green}Input provided....${reset}"
-else
-echo -e "${red}Proper input is not provided please provide raw reads...${reset}"
-Help # Call the help function to display usage
-exit 1
-fi
-######################################################
-#Read Quality Assessment using FastQC
-if command -v fastqc &>/dev/null; then # check for the fastqc programme
-echo -e "${green}fastqc programme in installed...${reset}" # if found run fastqc here
-mkdir fastqc_out && # make fastqc output folder
-export LC_ALL=C &&
-echo -e "${green}executing fastqc...${reset}" &&
-fastqc -o fastqc_out -f fastq "$forward_read" "$reverse_read" || exit 1 # running fastqc .....
-else
-# if not found ask for path and run fastqc here
-echo -e "${red}fastqc programme is not found please check this programme is eighter installed or present in your path...${reset}"
-echo -e "${yellow}please provide absolute path to the executable....${reset}"
-read -rp "Pleae provide absolue path to fastqc executable here : " fastqc
-echo -e "${green}Making fastqc output folder...${reset}"
-export LC_ALL=C &&
-mkdir fastqc_out && # make fastqc output folder
-echo -e "${green}executing fastqc...${reset}"
-"$fastqc" -o fastqc_out -f fastq "$forward_read" "$reverse_read" || exit 1
-wait for command to run using wait command
-fastqc_pid=$!
-wait $fastqc_pid
-fi || exit
-echo -e "${green} fastqc run sucessfully..."
-#############################################################
-# use multiqc to compile results
-mkdir multiqc_out && #create a directory named multiqc_out
-# navigate into the directory named multiqc_out
-if command -v multiqc &>/dev/null; then # check for multiqc programme
-echo -e "${green} multiqc programme is installed...${reset}" # if found run multiqc here
-echo -e "${green} executing multiqc...${reset}"
-multiqc  "$current_dir/fastqc_out" -o "$current_dir/multiqc_out" || exit 1
-else # if not found ask for path and run multiqc here
-echo -e "${red} multiqc programme is not found please check this programme is eighter installed or present in your path...${reset}"
-echo -e "${yellow} please provide absolute path to the multiqc executable....${reset}"
-read -rp "Pleae provide absolute path to multiqc executable here :" multiqc
-echo -e "${green} executing multiqc...${reset}"
-"$multiqc" -o "$current_dir/fastqc_out" ../multiqc_out || exit 1
-cd "$current_dir" &&
-# Wait for command to run using wait command
-multiqc_pid=$!
-wait "$multiqc_pid"
-fi || exit
-echo -e "${green} multiqc run sucessfully...${reset}"
-###############################################################
-# Use trimmomatic to trim unpaired reads and remove adapter sequences
-# Check for java
-if command -v java &>/dev/null; then
-echo -e "${green} java installed...${reset}"
-else # if not installed ask for installation
-echo -e "${red}Please install java and check if installed already check if it is present in your path..."
-fi || exit
-# Make directory for trimmomatic
-echo -e "${green}makeing output directory for trimmomatic...${reset}"
-mkdir trimmomatic_out &&
-# Check for trimmomatic
-# Taking parameters using if else statement
-# Navigate to trimmomatic_out directory and captute its path
-if command -v trimmomatic &>/dev/null; then # check for trimmomatic
-echo -e "${green} Trimmomatic programme is installed...${reset}"
-echo -e "${yellow} Please provide the relevent parameters for the tools...${reset}"
-read -rp "Please provide number of threads to run the tool : " thread
-read -rp "Please provide phread score : " phread
-read -rp "Please provide path to adapter file:" PATH_TO_ADAPTER_CONTAM_FILE
-read -rp "Please provide parameter LEADING: " leading
-read -rp "Please provide parameter TRAILING: " trailing
-read -rp "Please provide parameter SLIDINGWINDOW: " slidingwindow
-read -rp "Please provide parameter MINLEN: " minlength
-echo -e "${green} executing Trimmomatic...${reset}"
-trimmomatic PE -threads "$thread" -phred"$phread" "$forward_read" "$reverse_read" output_1P.fq output_1U.fq output_2P.fq output_2U.fq ILLUMINACLIP:"$PATH_TO_ADAPTER_CONTAM_FILE":2:30:10 LEADING:"$leading" TRAILING:"$trailing" SLIDINGWINDOW:"$slidingwindow" MINLEN:"$minlength" || exit 1  #To remove low quality base pairs and adapter sequences
-else # ask path to the trimmomatic programme path
-echo -e "${red} please install trimmomatic and check if already installed check if it is present in your path...${reset}"
-echo -e "${yellow} Please provide the absolute path to the trimmomatic executable here : ${reset}"
-read -rp "Please provide your trimmomatic path here : " trimmomatic
-echo -e "${yellow} Please provide the relevent parameters for the tools...${reset}"
-read -rp "Please provide number of threads to run the tool : " thread
-read -rp "Please provide phread score : " phread
-read -rp "Please provide path to adapter file :" PATH_TO_ADAPTER_CONTAM_FILE
-read -rp "Please provide parameter LEADING: " leading
-read -rp "Please provide parameter TRAILING: " trailing
-read -rp "Please provide parameter SLIDINGWINDOW: " slidingwindow
-read -rp "Please provide parameter MINLEN: " minlength
-echo -e "${green}executing Trimmomatic...${reset}"
-java -jar "$trimmomatic" PE -threads "$thread" -phred"$phread" "$forward_read" "$reverse_read" output_1P.fq output_1U.fq output_2P.fq output_2U.fq ILLUMINACLIP:"$PATH_TO_ADAPTER_CONTAM_FILE":2:30:10 LEADING:"$leading" TRAILING:"$trailing" SLIDINGWINDOW:"$slidingwindow" MINLEN:"$minlength" || exit 1   #To remove low quality base pairs and adapter sequences
-fi || exit
-# Wait for the command to be compleated
-trimmomatic_pid=$!
-wait $trimmomatic_pid
-# Move all output  to trimmomatic_out directory
-mv output_1P.fq output_1U.fq output_2P.fq output_2U.fq trimmomatic_out/ &&
-# Capturing path of trimmomatic_out directory
-cd trimmomatic_out && # navigate to trimmomatic directory
-trimmomatic_path=$(pwd) && # capturing directory path of trimmed reads
-cd "$current_dir" || exit 1
-#########################################################################################################
-# Merging of Overlapping Paired-end Reads using FLASH
-# Checking if flash is installed
-# Using if else statement to check and run command
-# Make directory for flash output
-mkdir flash_out && #make flash directory
-cd flash_out &&    #navigate to flash directory
-if command -v flash &>/dev/null; then
-echo -e "${green}flash is installed...${reset}"
-echo -e "${green}executing flash...${reset}"
-read -rp "Please provide input for parameter maximum overlap: " max_overlap
-flash --max-overlap "$max_overlap" "$trimmomatic_path/output_1P.fq" "$trimmomatic_path/output_2P.fq" > output -d "$PWD" || exit 1 #flash will generate notCombined and extended fastq files
-else # ask for the absolute path to the flash command
-echo -e "${red} flash is not installed if you think it is installed please check if it is in your path...${reset}"
-echo -e "${yellow}Please provide absolute path to the flash command...${reset}"
-read -rp "Please provide absolute path to the flash command here : " flash
-read -rp "Please provide input for parameter maximum overlap: " max_overlap
-echo -e "${green}executing flash...${reset}"
-"$flash" --max-overlap "$max_overlap" "$trimmomatic_path/output_1P.fq" "$trimmomatic_path/output_2P.fq" > output -d "$PWD" || exit 1 #flash will generate notCombined and extended fastq file
-fi || exit
-# Wait for the command to compleated
-flash_pid=$!
-wait $flash_pid
-# Capture flash path
-flash_path=$(pwd) &&  #use this in unicycler command to get extended frags
-# Change to the old directory
-cd "$current_dir" &&
-#############################################################################################################
-# De novo Genome Assembly using Unicycler
-# Check if unicycler is installed
-# Using if else statement to check and run command
-# Make directory for unicycler output
-# Make directory for unicycler output
-mkdir unicycler_out && cd unicycler_out || exit
-# Check if both unicycler and spades are installed
-if command -v spades &>/dev/null && command -v unicycler &>/dev/null; then
-echo -e "${green}Both spades and unicycler are installed.${reset}"
-               unicycler  -1 "$trimmomatic_path/output_1P.fq" \
-                          -2 "$trimmomatic_path/output_2P.fq" -s "$flash_path/out.extendedFrags.fastq" \
-                          -o assembly  || exit 1
-                                     fi || exit
-# Check if neither unicycler nor spades are installed
-if ! command -v spades &>/dev/null && ! command -v unicycler &>/dev/null; then
-echo -e "${red}Both unicycler and spades are not installed.${reset}"
-echo -e "${yellow}Please provide absolute paths to unicycler and spades.${reset}"
-read -rp "Please provide absolute path to unicycler: " unicycler
-echo -e "${green}Running unicycler.${reset}"
-        "$unicycler" -1 "$trimmomatic_path/output_1P.fq" \
-                    -2 "$trimmomatic_path/output_2P.fq" -s "$flash_path/out.extendedFrags.fastq" \
-                    -o assembly || exit 1
-fi || exit
-cd assembly &&
-assemblypath=$(pwd)
-# Wait for unicycler command to complete
-unicycler_pid=$!
-wait $unicycler_pid
-# Navigate to old directory
-cd "$current_dir" || exit
-#######################################################################################
-# Assessment of Assembly Quality using QUAST
-# Make quast output directory
-mkdir quast_out &&
-cd quast_out &&
-# Check if quast is installed
-if command -v quast &>/dev/null; then
-echo -e "${green}quast is installed...${reset}"
-echo -e "${green}Running quast...${reset}"
-quast -o quast_output "$assemblypath/assembly.fasta" || exit 1
-else # take absolute path to quast
-echo -e "${yellow}Please provide absolute path to quast.py and make sure python is installed...${reset}"
-read -rp "Please provide absolute path to quast here : " quast
-echo -e "${green}Running quast...${reset}"
-python "$quast" -o quast_output "$assemblypath/assembly.fasta" || exit 1
-fi || exit
-# Wait for quast command to complete
-quast_pid=$!
-wait $quast_pid
-# Print completion message
-echo -e "${green} Phase 1 complete!${reset}"
-##################################################################################################
-# Phase 2
-##################################################################################################
-cd "$current_dir" || exit
-cd trimmomatic_out || exit # navigate to trimmomatic_out directory
-trimmomatic_output_path=$(pwd) # capturing path
-cd "$current_dir" || exit
-# ask for path to reference genome
-echo -e "${yellow} Please provide path to reference genome...${reset}"
-read -rp "Please provide your path here : " reference_genome
-#check for required programme
-# List of required programs
-required_programs=("mash" "skesa" "spades" "seqtk" "unicycler" "plentyofbugs")
-# Check if each required program is installed
-missing_programs=()
-for program in "${required_programs[@]}"; do
-if ! command -v "$program" &> /dev/null; then
-missing_programs+=("$program")
-fi
-done
-# If there are missing programs, install them
-if [ ${#missing_programs[@]} -gt 0 ]; then
-echo -e "${red}The following programs are missing: ${missing_programs[*]}${reset}"
-echo -e "${missing_programs[@]}"
-echo -e "${yellow}Please install the following programmes.${reset}"
-echo -e "${missing_programs[@]}"
-######################################################################
-elif [ ${#missing_programs[@]} == 0 ]; then
-######################################################################
-echo -e "${yellow}Please provide name of assembler skesa or spades.${reset}"
-read -rp "Please provide your assembler name here: " assembler
-echo -e "${green}Running plenty of bugs.${reset}"
-plentyofbugs --assembler "$assembler" \
-             -f "${trimmomatic_output_path}/output_1P.fq" \
-             -r "${trimmomatic_output_path}/output_2P.fq" \
-             -g "$reference_genome" \
-             -o plentyofbugs_out
-######################################################################
-elif  ! command -v plentyofbugs &>/dev/null && ! command -v spades && ! command -v skesa && command -v seqtk && command -v unicycler && command -v seqtk && command -v mash; then
-######################################################################
-# ask for absolute path to unicycler and skesa or spades
-echo -e "${yellow}Please provide absolute path to plentyofbbugs.${reset}"
-read -rp "${yellow}Please provide absolute path to plentyofbugs here : " plentyofbugs
-echo -e "${yellow}Please provide absolute path to assembler skesa or spades.${reset}"
-read -rp "Please provide your assembler path here : " assembler
-"$plentyofbugs" --assembler "$assembler" \
-                -f "${trimmomatic_output_path}/output_1P.fq" \
-                -r "${trimmomatic_output_path}/output_2P.fq" \
-                -g "$reference_genome" \
-                -o plentyofbugs_out
-fi || exit
-#######make function###########################
-function activate_conda() {
-# If statement to check if the environment exists
-if conda env list | grep -q "install_env"; then
-echo -e "${green} Enviornment 'install_env' already exists. Skipping environment creation...${reset}"
-# Initiate conda environment
-echo -e "${yellow} Initiating conda environment...${reset}" &&
-source activate install_env &&
-# Install plentyofbugs command not found using pip
-if ! command -v plentyofbugs; then
-echo -e "${red}plentyofbugs not found.${reset}"
-echo -e "${green}trying installing plentyofbugs using pip.${reset}"
-pip install plentyofbugs
-fi
-# List of required programs
-required_programs=("mash" "skesa" "spades" "seqtk" "unicycler" "plentyofbugs")
-# Check if each required program is installed
-missing_programs=()
-for program in "${required_programs[@]}"; do
-if ! command -v "$program" &> /dev/null; then
-missing_programs+=("$program")
-fi
-done
-# If there are missing programs, install them
-if [ ${#missing_programs[@]} -gt 0 ]; then
-echo -e "${yellow}The following programs are missing and will be installed: ${missing_programs[*]}${reset}"
-echo "${missing_programs[@]}"
-# Install missing programs
-for program in "${missing_programs[@]}"; do
-echo -e "${yellow}Installing $program...${reset}"
-conda install --yes "bioconda::$program"
-done
-fi
-# run plenty of bugs
-echo -e "${green}Running plentyofbugs.${reset}"
-echo -e "${yellow}Please provide name of assembler skesa or spades.${reset}"
-read -rp "Please provide your assembler name here: " assembler
-echo -e "${green}Running plenty of bugs.${reset}"
-plentyofbugs --assembler "$assembler" \
-             -f "${trimmomatic_output_path}/output_1P.fq" \
-             -r "${trimmomatic_output_path}/output_2P.fq" \
-             -g "$reference_genome" \
-             -o plentyofbugs_out
-#conda deactivate
-conda deactivate
-else
-# Ask if the following command will be installed or not
-echo -p "${yellow} Would you like to install the following in conda environment? Please provide an answer with yes or no below !.${reset}"
-read -rp "Please provide your answer here : " answer
-# Use if else statement to evaluate the command line input
-if [ "$answer" == yes ]; then
-# Create the conda environment
-echo -e "${yellow} Creating conda environment...${reset}"
-conda create --name install_env &&
-# Initiate conda environment
-echo -e "${yellow} Initiating conda environment...${reset}"
-source activate install_env &&
-# Install plentyofbugs command not found using pip
-if ! command -v plentyofbugs; then
-echo -e "${red}plentyofbugs not found.${reset}"
-echo -e "${green}trying installing plentyofbugs using pip.${reset}"
-pip install plentyofbugs
-fi
-# List of required programs
-required_programs=("mash" "skesa" "spades" "seqtk" "unicycler" "plentyofbugs")
-# Check if each required program is installed
-missing_programs=()
-for program in "${required_programs[@]}"; do
-if ! command -v "$program" &> /dev/null; then
-missing_programs+=("$program")
-fi
-done
-# If there are missing programs, install them
-if [ ${#missing_programs[@]} -gt 0 ]; then
-echo -e "${yellow}The following programs are missing and will be installed: ${missing_programs[*]}${reset}"
-echo -e "${yellow}The following programs are missing and will be installed:${reset}"
-echo "${missing_programs[@]}"
-# Install missing programs
-for program in "${missing_programs[@]}"; do
-echo -e "${yellow}Installing $program..."
-conda install --yes "bioconda::$program"
-done
-echo -e "${green}Installation of required programs complete."
-# Run Plentyofbugs
-plentyofbugs --assembler "$assembler" \
-             -f "${trimmomatic_output_path}/output_1P.fq" \
-             -r "${trimmomatic_output_path}/output_2P.fq" \
-             -g "$reference_genome" \
-            -o plentyofbugs_out &&  #Selection of best genome based upon Mash Value
-conda deactivate
-else
-echo -e "${green}All required programs are already installed. Skipping installation."
-fi
-echo -e "${green} Installation complete...${reset}"
-# Run command plenty of bugs
-echo -e "${yellow} Please select assembler skesa or spades...${reset}"
-read -rp "Please provide your assembler skesa/spades here : " assembler
-plentyofbugs --assembler "$assembler" \
-             -f "${trimmomatic_output_path}/output_1P.fq" \
-             -r "${trimmomatic_output_path}/output_2P.fq" \
-             -g "$reference_genome" \
-             -o plentyofbugs_out &&  #Selection of best genome based upon Mash Value
-conda deactivate
-else
-echo -e "${red} ERROR: Please check all the tools are properly installed to run the program."
-fi
-fi
- }
-# Check if all required commands are missing
-if ! command -v plentyofbugs &>/dev/null && \
-   ! command -v spades &>/dev/null && \
-   ! command -v skesa &>/dev/null && \
-   ! command -v seqtk &>/dev/null && \
-   ! command -v unicycler &>/dev/null && \
-   ! command -v mash &>/dev/null; then
-     echo -e "${red}There are some programs missing and will be installed and run in a separate conda environment.${reset}"
-     echo -e "${yellow}Would you like to install them in a separate conda environment? If the problem persists, you can manually install them in the 'install_env' environment and then rerun the assembler.${reset}"
-     read -rp "${yellow}Please provide your answer here (yes/no): " yesno
-if [ "$yesno" == "yes" ]; then
-activate_conda
-else
-echo -e "${red}Please install the programs manually!"
-fi
-else
-echo -e "${green}status ...................ok!.${reset}"
-fi
-############################################################################################
-########################Percentage alignment calculation using Bowtie2
-# Change to current directory
-cd "$current_dir" || exit
-# Taking path to reference genome
-cd plentyofbugs_out &&
-reference_path=$(cat best_reference | awk '{print $1}') &&
-# Change path to current directory
-cd "$current_dir" || exit
-# Make bowtie2 directory
-mkdir bowtie2_out || exit
-# Change directory to bowtie2
-cd bowtie2_out  || exit
-# Do percentage alignment calculations
-if command -v bowtie2  &>/dev/null; then
-echo -e "${green}Bowtie2 is installed${reset}"
-echo -e "${green}Executing Bowtie2${reset}"
-echo -e "${green}Indexing reference genome${reset}"
-# Indexing reference genomes
-read -rp "Please provide full path to plentyofbugs best reference here : " reference_path_plentyofbugs
-bowtie2-build -f "$reference_path_plentyofbugs"  reference_index &&
-bowtie2build_pid=$!
-wait $bowtie2build_pid
-# Change to current directory
-cd "$current_dir" || exit
-# Change path to trimmomatic_out
-cd trimmomatic_out &&
-trimmomatic_output_path=$(pwd) &&
-# Change to current directory
-cd "$current_dir" || exit
-# Change path to bowtie2_out
-cd bowtie2_out || exit
-bowtie2 -x  reference_index -1 "$trimmomatic_output_path/output_1P.fq" -2 "$trimmomatic_output_path/output_2P.fq" -S out.sam &&
-bowtie2_pid=$!
-wait $bowtie2_pid
-else
-echo "${red}Error: Bowtie2 is not installed. Please install Bowtie2 and try again.${reset}"
-exit 1
-# Change to current directory
-cd "$current_dir" || exit
-fi || exit
-#########################################################################
-# Check if all the command exist
-#check for seqtk if not found store its path in a variable
-if command -v seqtk &>/dev/null; then
-echo -e "${green} seqtk is installed...${reset}"
-else
-# ask for path
-echo "${red} Please install seqtk...${reset}"
-fi || exit
-#check for AlignGraph if not found store its path in a variable
-if command -v AlignGraph &>/dev/null; then
-echo -e "${green} AlignGraph is installed...${reset}"
-else
-# ask to AlignGraph
-echo -e "${red} Please install AlignGraph...${reset}"
-fi || exit
-####################################################################################
-# Store the original directory
-cd "$current_dir" || exit
-##################################################################################
-# Reference Based Assembly
-cd plentyofbugs_out || exit
-reference_genome=$(cat best_reference | awk '{print $1}')
-cd "$current_dir" || exit
-cd "$current_dir"/plentyofbugs_out/assembly/ || exit
-contigpath=$(pwd)
-cd "$current_dir" || exit
-cd trimmomatic_out &&
-trimmed_read=$(pwd)
-cd "$current_dir" || exit
-# make directory for reference based assembly
-mkdir reference_based_assembly &&
-cd reference_based_assembly || exit
-reference_based_assembly=$(pwd)
-if command -v seqtk &>/dev/null && command -v AlignGraph &>/dev/null; then
-echo -e "${green}Running seqtk to convert fastq files to fasta files${reset}"
-seqtk seq -A "$trimmed_read/output_1P.fq" > output_1P.fa &&
-seqtk seq -A "$trimmed_read/output_2P.fq" > output_2P.fa &&
-seqtk_pid=$!
-wait $seqtk_pid
-#######################################################
-read -rp "please provide absolute pad_reads_1.py path": pad
-read -rp "please provide your raw read length input for parameter: " Pad_read
-python "$pad"  output_1P.fa padded_out1.fa "$Pad_read"
-python "$pad"  output_2P.fa padded_out2.fa "$Pad_read"
-#######################################################
-echo -e "${yellow} Please provide required input parameters for AlignGraph${reset}"
-read -rp "Please provide your input for parameter --distanceLow : "  distancelow
-read -rp "please provide your input for parameter --distancehigh : " distancehigh
-#read -rp "Please provide unicycler contig with absolute path  from unicycler --contig : " contigs
-read -rp "Please provide absolute path of best reference from plentyofbugs : "  best_reference_path
-echo -e "${green} Running AlignGraph${reset}"
-AlignGraph --read1 padded_out1.fa --read2 padded_out2.fa --contig "$assemblypath/assembly.fasta" --genome "$best_reference_path" --distanceLow "$distancelow" --distanceHigh "$distancehigh" --extendedContig "$reference_based_assembly/sample_extendedcontig.fasta" --remainingContig "$reference_based_assembly/sample_remainingcontig.fasta"
-else
-echo "${red}please install AlignGraph or seqtk if already installed please make sure they are in you current path${reset}"
-fi
-cd "$current_dir" || exit
-###################################################
-#use quast
-#make quast output dir
-mkdir quast2_out &&
-cd quast2_out &&
 
-# Check if quast is installed
-if command -v quast &>/dev/null; then
-    echo -e "${green}quast is installed...${reset}"
-    echo -e "${green}Running quast...${reset}"
+###############################################################################
+# Argument parsing
+###############################################################################
+parse_args() {
+    local args=("$@")
+    local i=0
 
-    file="${reference_based_assembly}/sample_extendedcontig.fasta"
+    while [[ $i -lt ${#args[@]} ]]; do
+        case "${args[$i]}" in
+            --resume)
+                RESUME_DIR="${args[$((i+1))]:-}"
+                [[ -n "$RESUME_DIR" ]] || die "--resume requires a directory."
+                [[ -d "$RESUME_DIR" ]] || die "Resume dir not found: $RESUME_DIR"
+                i=$((i+2))
+                ;;
+            --fresh)
+                FRESH=1
+                i=$((i+1))
+                ;;
+            *) break ;;
+        esac
+    done
 
-    # Check if file does not exist or is empty
-    if [[ ! -e "$file" || ! -s "$file" ]]; then
-        echo -e "${red}Warning: sample_extendedcontig.fasta is empty. sample_remainingcontig.fasta will be used${reset}"
-        echo -e "${green}Running quast...${reset}"
-        read -rp "Please provide minimum contig length for running quast here: " contig_length_quast
+    set -- "${args[@]:$i}"
+    OPTIND=1
+    while getopts ":1:2:T:P:A:L:G:W:M:o:X:b:C:R:d:D:g:m:Sh" opt; do
+        case "$opt" in
+            1) FORWARD_READ=$OPTARG ;;
+            2) REVERSE_READ=$OPTARG ;;
+            T) THREADS=$OPTARG ;;
+            P) PHRED=$OPTARG ;;
+            A) ADAPTER_FILE=$OPTARG ;;
+            L) LEADING=$OPTARG ;;
+            G) TRAILING=$OPTARG ;;
+            W) SLIDINGWINDOW=$OPTARG ;;
+            M) MINLEN=$OPTARG ;;
+            o) MAX_OVERLAP=$OPTARG ;;
+            X) ASSEMBLER=$OPTARG ;;
+            b) BUSCO_LINEAGE=$OPTARG ;;
+            C) PAD_SCRIPT=$OPTARG ;;
+            R) PAD_READ_LEN=$OPTARG ;;
+            d) DIST_LOW=$OPTARG ;;
+            D) DIST_HIGH=$OPTARG ;;
+            g) REFERENCE_DIR=$OPTARG ;;
+            m) ALIGN_THRESHOLD=$OPTARG ;;
+            S) SKIP_PHASE2=1 ;;
+            h) usage; exit 0 ;;
+            :) die "Option -$OPTARG requires an argument." ;;
+            \?) die "Unknown option: -$OPTARG" ;;
+        esac
+    done
+}
 
-        quast -o quast_output --min-contig "$contig_length_quast" "${reference_based_assembly}/sample_remainingcontig.fasta" || exit 1
+###############################################################################
+# Directory / checkpoint helpers
+###############################################################################
+ensure_dir() {
+    local d=$1
+    [[ -d "$d" ]] || mkdir -p "$d"
+    echo "$d"
+}
+
+step_done() {
+    [[ -f "$CHECKPOINT_DIR/$1.done" ]]
+}
+
+mark_done() {
+    ensure_dir "$CHECKPOINT_DIR" >/dev/null
+    date > "$CHECKPOINT_DIR/$1.done"
+    log "✓ Checkpoint: $1"
+}
+
+run_step() {
+    local name=$1
+    shift
+    if step_done "$name"; then
+        log "Skipping $name (already completed)"
+        return 0
+    fi
+    "$@"
+    mark_done "$name"
+}
+
+###############################################################################
+# Save / load config
+###############################################################################
+save_config() {
+    ensure_dir "$WORK_DIR" >/dev/null
+    cat > "$CONFIG_FILE" <<EOF
+# Pipeline configuration — auto-generated
+FORWARD_READ="$FORWARD_READ"
+REVERSE_READ="$REVERSE_READ"
+REFERENCE_DIR="$REFERENCE_DIR"
+THREADS="$THREADS"
+PHRED="$PHRED"
+ADAPTER_FILE="$ADAPTER_FILE"
+LEADING="$LEADING"
+TRAILING="$TRAILING"
+SLIDINGWINDOW="$SLIDINGWINDOW"
+MINLEN="$MINLEN"
+MAX_OVERLAP="$MAX_OVERLAP"
+ASSEMBLER="$ASSEMBLER"
+BUSCO_LINEAGE="$BUSCO_LINEAGE"
+PAD_SCRIPT="$PAD_SCRIPT"
+PAD_READ_LEN="$PAD_READ_LEN"
+DIST_LOW="$DIST_LOW"
+DIST_HIGH="$DIST_HIGH"
+ALIGN_THRESHOLD="$ALIGN_THRESHOLD"
+SKIP_PHASE2="$SKIP_PHASE2"
+EOF
+}
+
+load_config() {
+    local cfg="$WORK_DIR/.pipeline_config"
+    [[ -f "$cfg" ]] || return 0
+    # shellcheck disable=SC1090
+    source "$cfg"
+    log "Loaded config from previous run: $cfg"
+}
+
+###############################################################################
+# Input validation
+###############################################################################
+validate_inputs() {
+    [[ -n "$FORWARD_READ" ]] || { usage; die "Forward read (-1) is required."; }
+    [[ -n "$REVERSE_READ" ]] || { usage; die "Reverse read (-2) is required."; }
+    [[ -f "$FORWARD_READ" ]] || die "Forward read not found: $FORWARD_READ"
+    [[ -f "$REVERSE_READ" ]] || die "Reverse read not found: $REVERSE_READ"
+
+    [[ "$THREADS" =~ ^[1-9][0-9]*$ ]] || die "Threads must be a positive integer (got: $THREADS)."
+    [[ "$PHRED" == "33" || "$PHRED" == "64" ]] || die "Phred must be 33 or 64 (got: $PHRED)."
+    [[ "$ASSEMBLER" == "skesa" || "$ASSEMBLER" == "spades" ]] || die "Assembler must be 'skesa' or 'spades'."
+    [[ -z "$ADAPTER_FILE" || -f "$ADAPTER_FILE" ]] || die "Adapter file not found: $ADAPTER_FILE"
+
+    if [[ "$SKIP_PHASE2" -eq 0 ]]; then
+        [[ -n "$REFERENCE_DIR" ]] || die "Reference directory (-g) required for Phase 2 (or pass -S)."
+        [[ -d "$REFERENCE_DIR" ]] || die "Reference directory not found: $REFERENCE_DIR"
+
+        shopt -s nullglob
+        CANDIDATE_REFS=(
+            "$REFERENCE_DIR"/*.fa
+            "$REFERENCE_DIR"/*.fna
+            "$REFERENCE_DIR"/*.fasta
+            "$REFERENCE_DIR"/*.fa.gz
+            "$REFERENCE_DIR"/*.fna.gz
+            "$REFERENCE_DIR"/*.fasta.gz
+        )
+        shopt -u nullglob
+
+        [[ ${#CANDIDATE_REFS[@]} -gt 0 ]] || \
+            die "No FASTA files found in: $REFERENCE_DIR"
+
+        [[ -n "$PAD_SCRIPT" ]] || die "pad_reads_1.py (-C) required for Phase 2 (or pass -S)."
+        [[ -f "$PAD_SCRIPT" ]] || die "pad_reads_1.py not found: $PAD_SCRIPT"
+    fi
+}
+
+###############################################################################
+# Tool resolution
+###############################################################################
+declare -A TOOL_PATH
+
+resolve_tool() {
+    local name=$1
+    if [[ -n "${TOOL_PATH[$name]:-}" ]]; then
+        echo "${TOOL_PATH[$name]}"
+        return 0
+    fi
+    if command -v "$name" &>/dev/null; then
+        TOOL_PATH[$name]=$(command -v "$name")
     else
-        read -rp "Please provide minimum contig length for running quast here: " contig_length_quast
-        echo -e "${green}Running quast...${reset}"
-        quast -o quast_output --min-contig "$contig_length_quast" "${reference_based_assembly}/sample_extendedcontig.fasta" || exit 1
+        warn "$name not found on PATH."
+        local p
+        read -rp "Absolute path to $name: " p
+        [[ -x "$p" ]] || die "Not executable: $p"
+        TOOL_PATH[$name]=$p
     fi
-else
-    echo -e "${red}quast is not installed. Please install it first.${reset}"
-    exit 1
-fi
-cd "$current_dir" || exit
-###################################################
-#####################################################
-# Change to reference-based assembly directory and get its absolute path
-cd reference_based_assembly || exit
-reference_based_assembly_path=$(pwd) || exit
-cd "$current_dir" || exit
+    echo "${TOOL_PATH[$name]}"
+}
 
-# Create and enter BUSCO output directory
-mkdir -p busco || exit
-cd busco || exit
+###############################################################################
+# Phase 1.1 — FastQC
+###############################################################################
+run_fastqc() {
+    log "=== Phase 1.1: FastQC ==="
+    local fastqc_bin; fastqc_bin=$(resolve_tool fastqc)
+    local out; out=$(ensure_dir "$WORK_DIR/fastqc_out")
 
-# Check if BUSCO is installed
-if command -v busco &>/dev/null; then
-    echo -e "${green}BUSCO is installed.${reset}"
+    export LC_ALL=C
+    "$fastqc_bin" --outdir "$out" -f fastq -t "$THREADS" \
+        "$FORWARD_READ" "$REVERSE_READ"
 
-    # Check if sample_extendedcontig.fasta exists and is not empty
-    busco_input="${reference_based_assembly_path}/sample_extendedcontig.fasta"
-    if [[ ! -e "$busco_input" || ! -s "$busco_input" ]]; then
-        echo -e "${red}Error: sample_extendedcontig.fasta not found or empty in ${reference_based_assembly_path}.${reset}"
-        exit 1
+    log "FastQC complete -> $out"
+}
+
+###############################################################################
+# Phase 1.2 — MultiQC
+###############################################################################
+run_multiqc() {
+    log "=== Phase 1.2: MultiQC ==="
+    local multiqc_bin; multiqc_bin=$(resolve_tool multiqc)
+    local out; out=$(ensure_dir "$WORK_DIR/multiqc_out")
+
+    "$multiqc_bin" "$WORK_DIR/fastqc_out" -o "$out"
+
+    log "MultiQC complete -> $out"
+}
+
+###############################################################################
+# Phase 1.3 — Trimmomatic (wrapper on PATH)
+###############################################################################
+run_trimmomatic() {
+    log "=== Phase 1.3: Trimmomatic ==="
+    command -v java &>/dev/null || die "Java is required for Trimmomatic."
+
+    local out; out=$(ensure_dir "$WORK_DIR/trimmomatic_out")
+
+    local -a adapter_args=()
+    if [[ -n "$ADAPTER_FILE" ]]; then
+        adapter_args=(ILLUMINACLIP:"$ADAPTER_FILE":2:30:10)
     fi
 
-    # Ask user for lineage and run BUSCO
-    read -rp "Specify the name of the BUSCO lineage to be used: " busco_lineage
-    echo -e "${green}Running BUSCO on sample_extendedcontig.fasta...${reset}"
+    if command -v trimmomatic &>/dev/null; then
+        trimmomatic PE \
+            -threads "$THREADS" \
+            -phred"$PHRED" \
+            "$FORWARD_READ" "$REVERSE_READ" \
+            "$out/output_1P.fq" "$out/output_1U.fq" \
+            "$out/output_2P.fq" "$out/output_2U.fq" \
+            "${adapter_args[@]}" \
+            LEADING:"$LEADING" \
+            TRAILING:"$TRAILING" \
+            SLIDINGWINDOW:"$SLIDINGWINDOW" \
+            MINLEN:"$MINLEN"
+    else
+        local trim_jar
+        read -rp "Absolute path to trimmomatic.jar: " trim_jar
+        [[ -f "$trim_jar" ]] || die "trimmomatic.jar not found: $trim_jar"
+        java -jar "$trim_jar" PE \
+            -threads "$THREADS" \
+            -phred"$PHRED" \
+            "$FORWARD_READ" "$REVERSE_READ" \
+            "$out/output_1P.fq" "$out/output_1U.fq" \
+            "$out/output_2P.fq" "$out/output_2U.fq" \
+            "${adapter_args[@]}" \
+            LEADING:"$LEADING" \
+            TRAILING:"$TRAILING" \
+            SLIDINGWINDOW:"$SLIDINGWINDOW" \
+            MINLEN:"$MINLEN"
+    fi
 
-    busco -i "$busco_input" -m genome -l "$busco_lineage" -o busco_output || exit 1
+    log "Trimmomatic complete -> $out"
+}
 
-else
-    echo -e "${red}BUSCO is not installed. Please install it before proceeding.${reset}"
-    exit 1
-fi
+###############################################################################
+# Phase 1.4 — FLASH
+###############################################################################
+run_flash() {
+    log "=== Phase 1.4: FLASH ==="
+    local flash_bin; flash_bin=$(resolve_tool flash)
+    local out; out=$(ensure_dir "$WORK_DIR/flash_out")
 
-# Return to the original directory
-cd "$current_dir" || exit
-#####################################################################
+    "$flash_bin" \
+        --max-overlap "$MAX_OVERLAP" \
+        --threads "$THREADS" \
+        --output-prefix out \
+        --output-directory "$out" \
+        "$WORK_DIR/trimmomatic_out/output_1P.fq" \
+        "$WORK_DIR/trimmomatic_out/output_2P.fq"
+
+    log "FLASH complete -> $out"
+}
+
+###############################################################################
+# Phase 1.5 — Unicycler
+###############################################################################
+run_unicycler() {
+    log "=== Phase 1.5: Unicycler ==="
+    local unicycler_bin; unicycler_bin=$(resolve_tool unicycler)
+    resolve_tool spades >/dev/null
+
+    local out; out=$(ensure_dir "$WORK_DIR/unicycler_out")
+
+    "$unicycler_bin" \
+        -1 "$WORK_DIR/trimmomatic_out/output_1P.fq" \
+        -2 "$WORK_DIR/trimmomatic_out/output_2P.fq" \
+        -s "$WORK_DIR/flash_out/out.extendedFrags.fastq" \
+        -t "$THREADS" \
+        -o "$out/assembly"
+
+    log "Unicycler complete -> $out/assembly"
+}
+
+###############################################################################
+# QUAST (reusable)
+###############################################################################
+run_quast() {
+    local label=$1
+    local assembly=$2
+    local outdir=$3
+
+    log "=== QUAST ($label) ==="
+    local quast_bin; quast_bin=$(resolve_tool quast)
+
+    [[ -s "$assembly" ]] || die "Assembly FASTA not found or empty: $assembly"
+    ensure_dir "$outdir" >/dev/null
+
+    "$quast_bin" -o "$outdir/quast_output" -t "$THREADS" --min-contig 0 "$assembly"
+
+    log "QUAST ($label) complete -> $outdir/quast_output"
+}
+
+###############################################################################
+# Phase 2.1 — plentyofbugs
+###############################################################################
+run_plentyofbugs() {
+    log "=== Phase 2.1: plentyofbugs ==="
+    log "Candidate references in $REFERENCE_DIR: ${#CANDIDATE_REFS[@]}"
+
+    local pob_bin; pob_bin=$(resolve_tool plentyofbugs)
+    resolve_tool mash >/dev/null
+    resolve_tool seqtk >/dev/null
+    resolve_tool "$ASSEMBLER" >/dev/null
+
+    local out="$WORK_DIR/plentyofbugs_out"
+    if [[ -d "$out" ]]; then
+        log "Removing stale plentyofbugs_out/ so plentyofbugs can run fresh."
+        rm -rf "$out"
+    fi
+
+    "$pob_bin" \
+        --assembler "$ASSEMBLER" \
+        -f "$WORK_DIR/trimmomatic_out/output_1P.fq" \
+        -r "$WORK_DIR/trimmomatic_out/output_2P.fq" \
+        -g "$REFERENCE_DIR" \
+        -o "$out"
+
+    log "plentyofbugs complete -> $out"
+}
+
+###############################################################################
+# Extract chosen reference path
+###############################################################################
+get_best_reference() {
+    local best_ref_file="$WORK_DIR/plentyofbugs_out/best_reference"
+    [[ -f "$best_ref_file" ]] || die "best_reference not found: $best_ref_file"
+    local ref_path
+    ref_path=$(awk 'NR==1 {print $1}' "$best_ref_file")
+    [[ -f "$ref_path" ]] || die "Reference listed in best_reference not found: $ref_path"
+    echo "$ref_path"
+}
+
+###############################################################################
+# Alignment rate (correct bitmask handling)
+###############################################################################
+ALIGN_TOTAL="NA"
+ALIGN_ALIGNED="NA"
+ALIGN_RATE="NA"
+
+compute_alignment_rate() {
+    local sam=$1
+    local total aligned
+
+    if command -v samtools &>/dev/null; then
+        total=$(samtools view -c "$sam")
+        aligned=$(samtools view -F 4 -c "$sam")
+    elif awk 'BEGIN{exit !(and(1,1)==1)}' 2>/dev/null; then
+        total=$(grep -vc '^@' "$sam" || true)
+        aligned=$(awk '!/^@/ && and($2,4)==0' "$sam" | wc -l)
+    else
+        die "Need samtools or GNU awk for alignment-rate calculation."
+    fi
+
+    ALIGN_TOTAL=${total:-0}
+    ALIGN_ALIGNED=${aligned:-0}
+
+    awk -v a="$ALIGN_ALIGNED" -v t="$ALIGN_TOTAL" \
+        'BEGIN { if (t > 0) printf "%.2f", (a/t)*100; else print "0.00" }'
+}
+
+###############################################################################
+# Phase 2.2 — Bowtie2 + threshold (asks user in BOTH cases)
+###############################################################################
+run_bowtie2() {
+    log "=== Phase 2.2: Bowtie2 alignment ==="
+    local bt2_bin; bt2_bin=$(resolve_tool bowtie2)
+    local bt2_build; bt2_build=$(resolve_tool bowtie2-build)
+
+    local ref_path; ref_path=$(get_best_reference)
+    log "Best reference from plentyofbugs: $ref_path"
+
+    local out; out=$(ensure_dir "$WORK_DIR/bowtie2_out")
+    local idx="$out/reference_index"
+
+    "$bt2_build" -f "$ref_path" "$idx"
+
+    "$bt2_bin" \
+        -p "$THREADS" \
+        -x "$idx" \
+        -1 "$WORK_DIR/trimmomatic_out/output_1P.fq" \
+        -2 "$WORK_DIR/trimmomatic_out/output_2P.fq" \
+        -S "$out/out.sam"
+
+    local rate
+    rate=$(compute_alignment_rate "$out/out.sam")
+    ALIGN_RATE="$rate"
+
+    cat > "$out/alignment_report.txt" <<EOF
+Bowtie2 Alignment Report
+========================
+SAM file                : $out/out.sam
+Reference               : $ref_path
+Total alignment records : $ALIGN_TOTAL
+Aligned records         : $ALIGN_ALIGNED
+Alignment rate          : ${rate}%
+Threshold               : ${ALIGN_THRESHOLD}%
+EOF
+
+    log "Alignment rate: ${rate}% (threshold: ${ALIGN_THRESHOLD}%)"
+    cat "$out/alignment_report.txt"
+
+    if awk -v r="$rate" -v t="$ALIGN_THRESHOLD" 'BEGIN { exit !(r >= t) }'; then
+        echo -e "${green}Alignment rate is ${rate}%, which is >= ${ALIGN_THRESHOLD}%.${reset}"
+        echo -e "${yellow}Do you want to continue the pipeline? (yes/no)${reset}"
+        read -rp "Please provide your answer: " continue_pipeline
+        if [[ "$continue_pipeline" == "yes" || "$continue_pipeline" == "y" ]]; then
+            log "Continuing pipeline..."
+        else
+            log "Pipeline stopped by user."
+            exit 0
+        fi
+    else
+        echo -e "${red}Alignment rate is ${rate}%, which is < ${ALIGN_THRESHOLD}%.${reset}"
+        echo -e "${yellow}The alignment rate is below the recommended threshold.${reset}"
+        echo -e "${yellow}Do you still want to continue the pipeline? (yes/no)${reset}"
+        read -rp "Please provide your answer: " continue_pipeline
+        if [[ "$continue_pipeline" == "yes" || "$continue_pipeline" == "y" ]]; then
+            warn "Continuing pipeline despite alignment rate < ${ALIGN_THRESHOLD}%..."
+        else
+            log "Pipeline stopped by user."
+            exit 0
+        fi
+    fi
+}
+
+###############################################################################
+# Phase 2.3 — AlignGraph
+###############################################################################
+run_aligngraph() {
+    log "=== Phase 2.3: AlignGraph ==="
+    local seqtk_bin; seqtk_bin=$(resolve_tool seqtk)
+    local ag_bin; ag_bin=$(resolve_tool AlignGraph)
+
+    local ref_path; ref_path=$(get_best_reference)
+
+    local contigs="$WORK_DIR/unicycler_out/assembly/assembly.fasta"
+    [[ -s "$contigs" ]] || die "Unicycler assembly not found or empty: $contigs"
+
+    local out; out=$(ensure_dir "$WORK_DIR/reference_based_assembly")
+
+    "$seqtk_bin" seq -A "$WORK_DIR/trimmomatic_out/output_1P.fq" > "$out/output_1P.fa"
+    "$seqtk_bin" seq -A "$WORK_DIR/trimmomatic_out/output_2P.fq" > "$out/output_2P.fa"
+
+    python "$PAD_SCRIPT" "$out/output_1P.fa" "$out/padded_out1.fa" "$PAD_READ_LEN"
+    python "$PAD_SCRIPT" "$out/output_2P.fa" "$out/padded_out2.fa" "$PAD_READ_LEN"
+
+    (
+        cd "$out"
+        "$ag_bin" \
+            --read1 padded_out1.fa \
+            --read2 padded_out2.fa \
+            --contig "$contigs" \
+            --genome "$ref_path" \
+            --distanceLow "$DIST_LOW" \
+            --distanceHigh "$DIST_HIGH" \
+            --extendedContig sample_extendedcontig.fasta \
+            --remainingContig sample_remainingcontig.fasta
+    )
+
+    log "AlignGraph complete -> $out"
+
+    # --- Fallback logic ---
+    local ext="$out/sample_extendedcontig.fasta"
+    local rem="$out/sample_remainingcontig.fasta"
+
+    if [[ -s "$ext" ]]; then
+        ALIGNGRAPH_STATUS="OK"
+        ALIGNGRAPH_USED_FILE="$ext"
+        log "AlignGraph produced extended contigs: $ext"
+    elif [[ -s "$rem" ]]; then
+        ALIGNGRAPH_STATUS="FALLBACK"
+        ALIGNGRAPH_USED_FILE="$rem"
+        warn "extendedContig.fasta is empty — falling back to remainingContig.fasta."
+        warn "Downstream QUAST/BUSCO will use: $rem"
+    else
+        ALIGNGRAPH_STATUS="FAILED"
+        ALIGNGRAPH_USED_FILE=""
+        die "AlignGraph produced neither extended nor remaining contigs."
+    fi
+}
+
+###############################################################################
+# Phase 2.4 — BUSCO (uses ALIGNGRAPH_USED_FILE)
+###############################################################################
+run_busco() {
+    log "=== Phase 2.4: BUSCO ==="
+    local busco_bin; busco_bin=$(resolve_tool busco)
+
+    local out; out=$(ensure_dir "$WORK_DIR/busco_out")
+
+    # Choose input based on AlignGraph status
+    local input=""
+    if [[ -n "$ALIGNGRAPH_USED_FILE" && -s "$ALIGNGRAPH_USED_FILE" ]]; then
+        input="$ALIGNGRAPH_USED_FILE"
+    else
+        # Fallback chain
+        if [[ -s "$WORK_DIR/reference_based_assembly/sample_extendedcontig.fasta" ]]; then
+            input="$WORK_DIR/reference_based_assembly/sample_extendedcontig.fasta"
+        elif [[ -s "$WORK_DIR/reference_based_assembly/sample_remainingcontig.fasta" ]]; then
+            input="$WORK_DIR/reference_based_assembly/sample_remainingcontig.fasta"
+        else
+            input="$WORK_DIR/unicycler_out/assembly/assembly.fasta"
+        fi
+    fi
+    [[ -s "$input" ]] || die "No non-empty assembly FASTA found for BUSCO."
+
+    log "BUSCO input: $input"
+
+    (
+        cd "$out"
+        "$busco_bin" \
+            -i "$input" \
+            -m genome \
+            -l "$BUSCO_LINEAGE" \
+            -c "$THREADS" \
+            -o busco_run
+    )
+
+    log "BUSCO complete -> $out/busco_run"
+}
+
+###############################################################################
+# QUAST metric extractor
+###############################################################################
+quast_metric() {
+    local report=$1
+    local metric=$2
+    [[ -f "$report" ]] || { echo "NA"; return; }
+    awk -F'\t' -v m="$metric" '$1==m {print $2; exit}' "$report" 2>/dev/null | head -1
+}
+
+###############################################################################
+# Summary report
+###############################################################################
+write_summary_report() {
+    log "=== Writing summary report ==="
+    ensure_dir "$WORK_DIR" >/dev/null
+
+    local fq1_size fq2_size
+    fq1_size=$(du -h "$FORWARD_READ" 2>/dev/null | awk '{print $1}')
+    fq2_size=$(du -h "$REVERSE_READ" 2>/dev/null | awk '{print $1}')
+
+    local denovo_dir="$WORK_DIR/unicycler_out/assembly"
+    local refguided_dir="$WORK_DIR/reference_based_assembly"
+
+    local denovo_quast="$WORK_DIR/quast_out/quast_output/report.tsv"
+    local refguided_quast="$WORK_DIR/quast2_out/quast_output/report.tsv"
+
+    local best_ref="NA"
+    if [[ -f "$WORK_DIR/plentyofbugs_out/best_reference" ]]; then
+        best_ref=$(awk 'NR==1 {print $1}' "$WORK_DIR/plentyofbugs_out/best_reference")
+    fi
+
+    local busco_short="NA"
+    if compgen -G "$WORK_DIR/busco_out/busco_run/short_summary*.txt" > /dev/null; then
+        busco_short=$(grep -hE "C:.*S:.*D:.*F:.*M:" \
+            "$WORK_DIR/busco_out/busco_run/short_summary"*.txt 2>/dev/null | head -1 | sed 's/^[[:space:]]*//')
+    fi
+
+    # Which file was used for ref-guided QC?
+    local refguided_used="$ALIGNGRAPH_USED_FILE"
+    [[ -n "$refguided_used" ]] || refguided_used="$refguided_dir/sample_remainingcontig.fasta"
+
+    {
+        echo "======================================================================"
+        echo "                 GENOME ASSEMBLY PIPELINE — SUMMARY REPORT"
+        echo "======================================================================"
+        echo "Run finished   : $(date)"
+        echo "Working dir    : $WORK_DIR"
+        echo ""
+        echo "----------------------------------------------------------------------"
+        echo " INPUT"
+        echo "----------------------------------------------------------------------"
+        echo "Forward reads  : $FORWARD_READ   ($fq1_size)"
+        echo "Reverse reads  : $REVERSE_READ   ($fq2_size)"
+        echo ""
+        echo "----------------------------------------------------------------------"
+        echo " PHASE 1 — QC AND DE NOVO ASSEMBLY"
+        echo "----------------------------------------------------------------------"
+        echo "FastQC output        : $WORK_DIR/fastqc_out"
+        echo "MultiQC report       : $WORK_DIR/multiqc_out/multiqc_report.html"
+        echo ""
+        echo "Trimmomatic params   : threads=$THREADS phred=$PHRED"
+        echo "                       adapter=$ADAPTER_FILE"
+        echo "                       LEADING=$LEADING TRAILING=$TRAILING"
+        echo "                       SLIDINGWINDOW=$SLIDINGWINDOW MINLEN=$MINLEN"
+        echo "Trimmed reads        : $WORK_DIR/trimmomatic_out"
+        echo ""
+        echo "FLASH merged reads   : $WORK_DIR/flash_out/out.extendedFrags.fastq"
+        echo "                       max-overlap = $MAX_OVERLAP"
+        echo ""
+        echo "De novo assembly     : $denovo_dir/assembly.fasta"
+        echo "QUAST (de novo)      : $WORK_DIR/quast_out/quast_output/report.tsv"
+        echo "  # contigs          : $(quast_metric "$denovo_quast" '# contigs')"
+        echo "  Largest contig     : $(quast_metric "$denovo_quast" 'Largest contig')"
+        echo "  Total length       : $(quast_metric "$denovo_quast" 'Total length')"
+        echo "  N50                : $(quast_metric "$denovo_quast" 'N50')"
+        echo "  L50                : $(quast_metric "$denovo_quast" 'L50')"
+        echo "  GC (%)             : $(quast_metric "$denovo_quast" 'GC (%)')"
+        echo ""
+
+        if [[ "$SKIP_PHASE2" -eq 1 ]]; then
+            echo "----------------------------------------------------------------------"
+            echo " PHASE 2 — SKIPPED (-S)"
+            echo "----------------------------------------------------------------------"
+        else
+            echo "----------------------------------------------------------------------"
+            echo " PHASE 2 — REFERENCE-BASED EVALUATION"
+            echo "----------------------------------------------------------------------"
+            echo "Candidate refs dir   : $REFERENCE_DIR  (${#CANDIDATE_REFS[@]} FASTA files)"
+            echo "Best reference       : $best_ref"
+            echo "                       (chosen by plentyofbugs via Mash)"
+            echo "plentyofbugs output  : $WORK_DIR/plentyofbugs_out"
+            echo "Assembler used       : $ASSEMBLER"
+            echo ""
+            echo "Bowtie2 alignment"
+            echo "  SAM                : $WORK_DIR/bowtie2_out/out.sam"
+            echo "  Report             : $WORK_DIR/bowtie2_out/alignment_report.txt"
+            echo "  Total records      : $ALIGN_TOTAL"
+            echo "  Aligned records    : $ALIGN_ALIGNED"
+            echo "  Alignment rate     : ${ALIGN_RATE}%"
+            echo "  Threshold          : ${ALIGN_THRESHOLD}%"
+            echo ""
+            echo "AlignGraph output    : $refguided_dir"
+            echo "  Status             : $ALIGNGRAPH_STATUS"
+            echo "  Extended contigs   : $refguided_dir/sample_extendedcontig.fasta"
+            echo "  Remaining contigs  : $refguided_dir/sample_remainingcontig.fasta"
+            echo "  Used for QC        : $refguided_used"
+            echo "  distanceLow        : $DIST_LOW"
+            echo "  distanceHigh       : $DIST_HIGH"
+            echo ""
+            echo "QUAST (ref-guided)   : $WORK_DIR/quast2_out/quast_output/report.tsv"
+            echo "  # contigs          : $(quast_metric "$refguided_quast" '# contigs')"
+            echo "  Largest contig     : $(quast_metric "$refguided_quast" 'Largest contig')"
+            echo "  Total length       : $(quast_metric "$refguided_quast" 'Total length')"
+            echo "  N50                : $(quast_metric "$refguided_quast" 'N50')"
+            echo "  L50                : $(quast_metric "$refguided_quast" 'L50')"
+            echo "  GC (%)             : $(quast_metric "$refguided_quast" 'GC (%)')"
+            echo ""
+            echo "BUSCO completeness   : $WORK_DIR/busco_out/busco_run"
+            echo "  Lineage            : $BUSCO_LINEAGE"
+            echo "  Summary            : $busco_short"
+            echo ""
+
+            if [[ "$ALIGNGRAPH_STATUS" == "FALLBACK" ]]; then
+                echo "NOTE: AlignGraph produced no extended contigs (0-byte extendedContig)."
+                echo "      The pipeline automatically used remainingContig for QUAST/BUSCO."
+                echo "      This indicates the de novo assembly was already complete"
+                echo "      relative to the reference; no scaffolding was necessary."
+                echo ""
+            fi
+
+            echo "----------------------------------------------------------------------"
+            echo " COMPARISON: de novo vs reference-guided"
+            echo "----------------------------------------------------------------------"
+            local dn_n50 rf_n50 dn_c rf_c dn_len rf_len
+            dn_n50=$(quast_metric "$denovo_quast" 'N50')
+            rf_n50=$(quast_metric "$refguided_quast" 'N50')
+            dn_c=$(quast_metric "$denovo_quast" '# contigs')
+            rf_c=$(quast_metric "$refguided_quast" '# contigs')
+            dn_len=$(quast_metric "$denovo_quast" 'Total length')
+            rf_len=$(quast_metric "$refguided_quast" 'Total length')
+            printf "                         %-14s %s\n" "de novo" "reference-guided"
+            printf "  # contigs           : %-14s %s\n" "$dn_c"   "$rf_c"
+            printf "  Total length        : %-14s %s\n" "$dn_len" "$rf_len"
+            printf "  N50                 : %-14s %s\n" "$dn_n50" "$rf_n50"
+        fi
+
+        echo ""
+        echo "----------------------------------------------------------------------"
+        echo " KEY OUTPUT FILES"
+        echo "----------------------------------------------------------------------"
+        echo "Final de novo asm    : $denovo_dir/assembly.fasta"
+        if [[ "$SKIP_PHASE2" -eq 0 ]]; then
+            echo "Final ref-guided asm : $refguided_used"
+        fi
+        echo "Full log             : $LOG_FILE"
+        echo "This report          : $REPORT_FILE"
+        echo ""
+        echo "======================================================================"
+    } > "$REPORT_FILE"
+
+    log "Summary report written -> $REPORT_FILE"
+    echo ""
+    cat "$REPORT_FILE"
+}
+
+###############################################################################
+# Main
+###############################################################################
+main() {
+    parse_args "$@"
+
+    local CURRENT_DIR
+    CURRENT_DIR=$(pwd)
+
+    if [[ -n "$RESUME_DIR" ]]; then
+        WORK_DIR="$RESUME_DIR"
+    else
+        WORK_DIR="$CURRENT_DIR/assembly_pipeline_$(date +%Y%m%d_%H%M%S)"
+    fi
+    CHECKPOINT_DIR="$WORK_DIR/.checkpoints"
+    LOG_FILE="$WORK_DIR/pipeline.log"
+    REPORT_FILE="$WORK_DIR/summary_report.txt"
+    CONFIG_FILE="$WORK_DIR/.pipeline_config"
+
+    if [[ -n "$RESUME_DIR" ]]; then
+        ensure_dir "$WORK_DIR" >/dev/null
+        local cli_fwd="$FORWARD_READ"
+        local cli_rev="$REVERSE_READ"
+        local cli_ref="$REFERENCE_DIR"
+        local cli_skip="$SKIP_PHASE2"
+        load_config
+        [[ -n "$cli_fwd" ]] && FORWARD_READ="$cli_fwd"
+        [[ -n "$cli_rev" ]] && REVERSE_READ="$cli_rev"
+        [[ -n "$cli_ref" ]] && REFERENCE_DIR="$cli_ref"
+        [[ "$cli_skip" -eq 1 ]] && SKIP_PHASE2=1
+    fi
+
+    validate_inputs
+
+    ensure_dir "$WORK_DIR" >/dev/null
+    ensure_dir "$CHECKPOINT_DIR" >/dev/null
+    : >> "$LOG_FILE"
+
+    log "Pipeline started: $(date)"
+    log "Working dir   : $WORK_DIR"
+    if [[ -n "$RESUME_DIR" ]]; then
+        log "RESUME MODE — skipping completed steps"
+    fi
+
+    save_config
+
+    # ---- Phase 1 ----
+    run_step "01_fastqc"       run_fastqc
+    run_step "02_multiqc"      run_multiqc
+    run_step "03_trimmomatic"  run_trimmomatic
+    run_step "04_flash"        run_flash
+    run_step "05_unicycler"    run_unicycler
+    run_step "06_quast_denovo" run_quast "de-novo" \
+        "$WORK_DIR/unicycler_out/assembly/assembly.fasta" \
+        "$WORK_DIR/quast_out"
+
+    log "Phase 1 complete."
+
+    # ---- Phase 2 ----
+    if [[ "$SKIP_PHASE2" -eq 1 ]]; then
+        log "Phase 2 skipped (-S)."
+        write_summary_report
+        log "Pipeline finished: $(date)"
+        exit 0
+    fi
+
+    run_step "07_plentyofbugs" run_plentyofbugs
+    run_step "08_bowtie2"      run_bowtie2
+    run_step "09_aligngraph"   run_aligngraph
+
+    # After AlignGraph: if we skipped it (checkpoint present), recompute status
+    if step_done "09_aligngraph" && [[ "$ALIGNGRAPH_STATUS" == "not run" ]]; then
+        local ext="$WORK_DIR/reference_based_assembly/sample_extendedcontig.fasta"
+        local rem="$WORK_DIR/reference_based_assembly/sample_remainingcontig.fasta"
+        if [[ -s "$ext" ]]; then
+            ALIGNGRAPH_STATUS="OK"
+            ALIGNGRAPH_USED_FILE="$ext"
+        elif [[ -s "$rem" ]]; then
+            ALIGNGRAPH_STATUS="FALLBACK"
+            ALIGNGRAPH_USED_FILE="$rem"
+        fi
+    fi
+
+    # Choose ref-guided input for QUAST
+    local refguided_input="$WORK_DIR/reference_based_assembly/sample_extendedcontig.fasta"
+    if [[ ! -s "$refguided_input" ]]; then
+        refguided_input="$WORK_DIR/reference_based_assembly/sample_remainingcontig.fasta"
+        [[ -s "$refguided_input" ]] || refguided_input="$WORK_DIR/unicycler_out/assembly/assembly.fasta"
+    fi
+
+    run_step "10_quast_refguided" run_quast "reference-guided" \
+        "$refguided_input" \
+        "$WORK_DIR/quast2_out"
+
+    run_step "11_busco" run_busco
+
+    log "Phase 2 complete."
+
+    write_summary_report
+
+    log "Pipeline finished: $(date)"
+    log "Results: $WORK_DIR"
+}
+
+main "$@"
