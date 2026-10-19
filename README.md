@@ -63,7 +63,7 @@ Other tools:
   -S             Skip Phase 2
   -h             Show this help
 
-## Running with Docker
+```## Running with Docker
 
 ### Install Docker
 
