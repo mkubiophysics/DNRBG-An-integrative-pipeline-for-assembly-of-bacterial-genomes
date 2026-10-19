@@ -63,10 +63,6 @@ Other tools:
   -S             Skip Phase 2
   -h             Show this help
 
-```bash
-./dnrbg.sh -h
-```
-
 ## Running with Docker
 
 ### Install Docker
