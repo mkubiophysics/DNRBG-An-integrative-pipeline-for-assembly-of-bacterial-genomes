@@ -63,7 +63,8 @@ Other tools:
   -S             Skip Phase 2
   -h             Show this help
 
-```## Running with Docker
+```
+## Running with Docker
 
 ### Install Docker
 
@@ -73,7 +74,7 @@ https://docs.docker.com/engine/install/ubuntu/
 
 ### Pull the Docker image
 
-```bash
+bash
 docker pull mkulab/dnrbg_latest:v1.0
 ```
 
