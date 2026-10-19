@@ -132,7 +132,7 @@ nextflow run dnrbg.nf \
   --assembler /path/to/skesa \
   --reference_genome /path/to/reference_genome \
   --pad_read_path /path/to/pad_reads.py \
-  --distancelow 100 \
+  --distancelow 200 \
   --distancehigh 1000 \
   --outputDir1 fastqc_out \
   --outputDir2 multiqc_out \
