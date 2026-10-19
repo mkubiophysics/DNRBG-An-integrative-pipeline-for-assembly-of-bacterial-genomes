@@ -26,7 +26,7 @@ params.reference_genome = 'path/to/your/reference/genome/dir'
 params.pad_read_path = 'path/to/your/pad_reads.py'
 
 // Define input parameters for AlignGraph
-params.distancelow = 100
+params.distancelow = 200
 params.distancehigh = 1000
 
 // Define input parameters for quast2 (add this with your other params)
