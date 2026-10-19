@@ -73,7 +73,7 @@ Install Docker by following the official instructions:
 https://docs.docker.com/engine/install/ubuntu/
 
 ### Pull the Docker image
-
+```
 bash
 docker pull mkulab/dnrbg_latest:v1.0
 ```
