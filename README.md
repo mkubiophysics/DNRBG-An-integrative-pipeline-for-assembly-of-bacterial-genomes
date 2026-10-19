@@ -28,19 +28,40 @@ Additional dependencies and executables may be required depending on the selecte
 The pipeline can be run using the `dnrbg.sh` shell script.
 
 ```bash
-./dnrbg.sh \
-  -1 /path/to/read1.fastq \
-  -2 /path/to/read2.fastq \
-  -g /path/to/reference_genome
-```
+Usage:
+  dnrbg.sh -1 <R1.fastq> -2 <R2.fastq> -g <REF_DIR> [options]
+  dnrbg.sh --resume <WORK_DIR> [options]
+  dnrbg.sh --fresh -1 <R1.fastq> -2 <R2.fastq> [options]
 
-Arguments:
+Resume:
+  --resume DIR   Resume a previous run (skip completed steps)
+  --fresh        Force a new run
 
-- `-1`: Path to the forward FASTQ file.
-- `-2`: Path to the reverse FASTQ file.
-- `-g`: Directory containing candidate reference genome FASTA files.
+Required:
+  -1 FILE        Path to forward reads (FASTQ)
+  -2 FILE        Path to reverse reads (FASTQ)
+  -g DIR         Directory of candidate reference FASTA files
 
-Additional parameters can be specified as needed. Run the following command to view the available options:
+Trimmomatic:
+  -T INT         Threads                       (default: 4)
+  -P INT         Phred (33|64)                 (default: 33)
+  -A FILE        Adapter FASTA
+  -L INT         LEADING                       (default: 3)
+  -G INT         TRAILING                      (default: 3)
+  -W STR         SLIDINGWINDOW                 (default: 4:15)
+  -M INT         MINLEN                        (default: 36)
+
+Other tools:
+  -o INT         FLASH max-overlap             (default: 10)
+  -X STR         Assembler (skesa|spades)      (default: skesa)
+  -b STR         BUSCO lineage                 (default: bacteria_odb10)
+  -C FILE        Path to pad_reads_1.py
+  -R INT         Read length for padding       (default: 150)
+  -d INT         AlignGraph --distanceLow      (default: 200)
+  -D INT         AlignGraph --distanceHigh     (default: 1000)
+  -m INT         Alignment-rate threshold %    (default: 75)
+  -S             Skip Phase 2
+  -h             Show this help
 
 ```bash
 ./dnrbg.sh -h
