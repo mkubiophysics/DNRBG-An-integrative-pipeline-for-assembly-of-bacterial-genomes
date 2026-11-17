@@ -8,9 +8,11 @@
 # Resume:
 #   ./dnrbg_1.sh --resume <WORK_DIR> [other flags]
 #
-# AlignGraph fallback:
-#   If sample_extendedcontig.fasta is empty (0 bytes), the pipeline
-#   automatically uses sample_remainingcontig.fasta for QUAST and BUSCO.
+# AlignGraph output:
+#   sample_extendedcontig.fasta  +  sample_remainingcontig.fasta
+#   are merged into ONE complete assembly file (with unique ext_/rem_
+#   prefixes to avoid contig-ID collisions) which is then used for
+#   both QUAST and BUSCO.
 #
 set -euo pipefail
 
@@ -48,7 +50,7 @@ ASSEMBLER="skesa"
 BUSCO_LINEAGE="bacteria_odb10"
 PAD_SCRIPT=""
 PAD_READ_LEN=150
-DIST_LOW=200
+DIST_LOW=100
 DIST_HIGH=1000
 REFERENCE_DIR=""
 SKIP_PHASE2=0
@@ -399,8 +401,8 @@ run_unicycler() {
     local out; out=$(ensure_dir "$WORK_DIR/unicycler_out")
 
     "$unicycler_bin" \
-        -1 "$WORK_DIR/trimmomatic_out/output_1P.fq" \
-        -2 "$WORK_DIR/trimmomatic_out/output_2P.fq" \
+        -1 "$WORK_DIR/flash_out/out.notCombined_1.fastq" \
+        -2 "$WORK_DIR/flash_out/out.notCombined_2.fastq" \
         -s "$WORK_DIR/flash_out/out.extendedFrags.fastq" \
         -t "$THREADS" \
         -o "$out/assembly"
@@ -409,20 +411,28 @@ run_unicycler() {
 }
 
 ###############################################################################
-# QUAST (reusable)
+# QUAST (reusable) — accepts ONE or more FASTA files
 ###############################################################################
 run_quast() {
     local label=$1
-    local assembly=$2
-    local outdir=$3
+    local outdir=$2
+    shift 2
+    local -a assemblies=("$@")
 
     log "=== QUAST ($label) ==="
     local quast_bin; quast_bin=$(resolve_tool quast)
 
-    [[ -s "$assembly" ]] || die "Assembly FASTA not found or empty: $assembly"
+    local -a valid_inputs=()
+    local asm
+    for asm in "${assemblies[@]}"; do
+        [[ -s "$asm" ]] && valid_inputs+=("$asm")
+    done
+    [[ ${#valid_inputs[@]} -gt 0 ]] || die "No non-empty assembly FASTA found for QUAST."
+
+    log "QUAST input files (${#valid_inputs[@]}): ${valid_inputs[*]}"
     ensure_dir "$outdir" >/dev/null
 
-    "$quast_bin" -o "$outdir/quast_output" -t "$THREADS" --min-contig 0 "$assembly"
+    "$quast_bin" -o "$outdir/quast_output" -t "$THREADS" --min-contig 0 "${valid_inputs[@]}"
 
     log "QUAST ($label) complete -> $outdir/quast_output"
 }
@@ -478,21 +488,22 @@ compute_alignment_rate() {
     local sam=$1
     local total aligned
 
-    if command -v samtools &>/dev/null; then
-        total=$(samtools view -c "$sam")
-        aligned=$(samtools view -F 4 -c "$sam")
-    elif awk 'BEGIN{exit !(and(1,1)==1)}' 2>/dev/null; then
-        total=$(grep -vc '^@' "$sam" || true)
-        aligned=$(awk '!/^@/ && and($2,4)==0' "$sam" | wc -l)
-    else
-        die "Need samtools or GNU awk for alignment-rate calculation."
-    fi
+    total=$(samtools view -S -c "$sam") ||
+        die "Failed to count total SAM records."
 
-    ALIGN_TOTAL=${total:-0}
-    ALIGN_ALIGNED=${aligned:-0}
+    aligned=$(samtools view -S -F 4 -c "$sam") ||
+        die "Failed to count mapped SAM records."
 
-    awk -v a="$ALIGN_ALIGNED" -v t="$ALIGN_TOTAL" \
-        'BEGIN { if (t > 0) printf "%.2f", (a/t)*100; else print "0.00" }'
+    ALIGN_TOTAL=$total
+    ALIGN_ALIGNED=$aligned
+
+    ALIGN_RATE=$(awk -v a="$aligned" -v t="$total" \
+        'BEGIN {
+            if (t > 0)
+                printf "%.2f", (a/t)*100
+            else
+                print "0.00"
+        }')
 }
 
 ###############################################################################
@@ -518,9 +529,8 @@ run_bowtie2() {
         -2 "$WORK_DIR/trimmomatic_out/output_2P.fq" \
         -S "$out/out.sam"
 
-    local rate
-    rate=$(compute_alignment_rate "$out/out.sam")
-    ALIGN_RATE="$rate"
+    compute_alignment_rate "$out/out.sam"
+    local rate="$ALIGN_RATE"
 
     cat > "$out/alignment_report.txt" <<EOF
 Bowtie2 Alignment Report
@@ -596,14 +606,18 @@ run_aligngraph() {
 
     log "AlignGraph complete -> $out"
 
-    # --- Fallback logic ---
+    # --- Status logic (both files are used downstream) ---
     local ext="$out/sample_extendedcontig.fasta"
     local rem="$out/sample_remainingcontig.fasta"
 
-    if [[ -s "$ext" ]]; then
+    if [[ -s "$ext" && -s "$rem" ]]; then
+        ALIGNGRAPH_STATUS="OK"
+        ALIGNGRAPH_USED_FILE="$ext + $rem (merged)"
+        log "AlignGraph produced BOTH extended and remaining contigs (will be merged downstream)."
+    elif [[ -s "$ext" ]]; then
         ALIGNGRAPH_STATUS="OK"
         ALIGNGRAPH_USED_FILE="$ext"
-        log "AlignGraph produced extended contigs: $ext"
+        log "AlignGraph produced extended contigs (remaining empty): $ext"
     elif [[ -s "$rem" ]]; then
         ALIGNGRAPH_STATUS="FALLBACK"
         ALIGNGRAPH_USED_FILE="$rem"
@@ -617,7 +631,24 @@ run_aligngraph() {
 }
 
 ###############################################################################
-# Phase 2.4 — BUSCO (uses ALIGNGRAPH_USED_FILE)
+# Merge extended + remaining into ONE FASTA with unique ext_/rem_ prefixes
+###############################################################################
+merge_aligngraph_outputs() {
+    local ext=$1
+    local rem=$2
+    local merged=$3
+
+    : > "$merged"
+    if [[ -s "$ext" ]]; then
+        awk '/^>/{sub(/^>/,">ext_"); print; next} {print}' "$ext" >> "$merged"
+    fi
+    if [[ -s "$rem" ]]; then
+        awk '/^>/{sub(/^>/,">rem_"); print; next} {print}' "$rem" >> "$merged"
+    fi
+}
+
+###############################################################################
+# Phase 2.4 — BUSCO (extended + remaining merged into one file)
 ###############################################################################
 run_busco() {
     log "=== Phase 2.4: BUSCO ==="
@@ -625,23 +656,18 @@ run_busco() {
 
     local out; out=$(ensure_dir "$WORK_DIR/busco_out")
 
-    # Choose input based on AlignGraph status
-    local input=""
-    if [[ -n "$ALIGNGRAPH_USED_FILE" && -s "$ALIGNGRAPH_USED_FILE" ]]; then
-        input="$ALIGNGRAPH_USED_FILE"
+    local ext="$WORK_DIR/reference_based_assembly/sample_extendedcontig.fasta"
+    local rem="$WORK_DIR/reference_based_assembly/sample_remainingcontig.fasta"
+    local input="$out/complete_assembly_for_busco.fasta"
+
+    if [[ -s "$ext" || -s "$rem" ]]; then
+        merge_aligngraph_outputs "$ext" "$rem" "$input"
+        log "BUSCO input: $input (extended + remaining merged, $(grep -c '^>' "$input") contigs, $(awk '/^>/{next}{s+=length}END{print s}' "$input") bp)"
     else
-        # Fallback chain
-        if [[ -s "$WORK_DIR/reference_based_assembly/sample_extendedcontig.fasta" ]]; then
-            input="$WORK_DIR/reference_based_assembly/sample_extendedcontig.fasta"
-        elif [[ -s "$WORK_DIR/reference_based_assembly/sample_remainingcontig.fasta" ]]; then
-            input="$WORK_DIR/reference_based_assembly/sample_remainingcontig.fasta"
-        else
-            input="$WORK_DIR/unicycler_out/assembly/assembly.fasta"
-        fi
+        input="$WORK_DIR/unicycler_out/assembly/assembly.fasta"
+        log "BUSCO input: $input (fallback to de-novo)"
     fi
     [[ -s "$input" ]] || die "No non-empty assembly FASTA found for BUSCO."
-
-    log "BUSCO input: $input"
 
     (
         cd "$out"
@@ -682,6 +708,7 @@ write_summary_report() {
 
     local denovo_quast="$WORK_DIR/quast_out/quast_output/report.tsv"
     local refguided_quast="$WORK_DIR/quast2_out/quast_output/report.tsv"
+    local merged_quast_asm="$WORK_DIR/reference_based_assembly/complete_assembly_for_quast.fasta"
 
     local best_ref="NA"
     if [[ -f "$WORK_DIR/plentyofbugs_out/best_reference" ]]; then
@@ -694,9 +721,18 @@ write_summary_report() {
             "$WORK_DIR/busco_out/busco_run/short_summary"*.txt 2>/dev/null | head -1 | sed 's/^[[:space:]]*//')
     fi
 
-    # Which file was used for ref-guided QC?
-    local refguided_used="$ALIGNGRAPH_USED_FILE"
-    [[ -n "$refguided_used" ]] || refguided_used="$refguided_dir/sample_remainingcontig.fasta"
+    # Stats of the merged ref-guided assembly actually fed to QUAST/BUSCO
+    local merged_contigs="NA"
+    local merged_bp="NA"
+    if [[ -s "$merged_quast_asm" ]]; then
+        merged_contigs=$(grep -c '^>' "$merged_quast_asm")
+        merged_bp=$(awk '/^>/{next}{s+=length}END{print s}' "$merged_quast_asm")
+    fi
+
+    local refguided_used="NA"
+    if [[ -s "$merged_quast_asm" ]]; then
+        refguided_used="$merged_quast_asm"
+    fi
 
     {
         echo "======================================================================"
@@ -762,11 +798,16 @@ write_summary_report() {
             echo "  Status             : $ALIGNGRAPH_STATUS"
             echo "  Extended contigs   : $refguided_dir/sample_extendedcontig.fasta"
             echo "  Remaining contigs  : $refguided_dir/sample_remainingcontig.fasta"
-            echo "  Used for QC        : $refguided_used"
+            echo "  Extended count     : $(grep -c '^>' "$refguided_dir/sample_extendedcontig.fasta" 2>/dev/null || echo 0)"
+            echo "  Remaining count    : $(grep -c '^>' "$refguided_dir/sample_remainingcontig.fasta" 2>/dev/null || echo 0)"
+            echo "  Merged assembly    : $refguided_used"
+            echo "  Merged contigs     : $merged_contigs"
+            echo "  Merged total bp    : $merged_bp"
             echo "  distanceLow        : $DIST_LOW"
             echo "  distanceHigh       : $DIST_HIGH"
             echo ""
             echo "QUAST (ref-guided)   : $WORK_DIR/quast2_out/quast_output/report.tsv"
+            echo "  Input              : extended + remaining (merged, unique ext_/rem_)"
             echo "  # contigs          : $(quast_metric "$refguided_quast" '# contigs')"
             echo "  Largest contig     : $(quast_metric "$refguided_quast" 'Largest contig')"
             echo "  Total length       : $(quast_metric "$refguided_quast" 'Total length')"
@@ -775,11 +816,16 @@ write_summary_report() {
             echo "  GC (%)             : $(quast_metric "$refguided_quast" 'GC (%)')"
             echo ""
             echo "BUSCO completeness   : $WORK_DIR/busco_out/busco_run"
+            echo "  Input              : extended + remaining (merged)"
             echo "  Lineage            : $BUSCO_LINEAGE"
             echo "  Summary            : $busco_short"
             echo ""
 
-            if [[ "$ALIGNGRAPH_STATUS" == "FALLBACK" ]]; then
+            if [[ "$ALIGNGRAPH_STATUS" == "OK" ]]; then
+                echo "NOTE: AlignGraph produced both extended and remaining contigs."
+                echo "      Both files were merged into one complete assembly for QUAST/BUSCO."
+                echo ""
+            elif [[ "$ALIGNGRAPH_STATUS" == "FALLBACK" ]]; then
                 echo "NOTE: AlignGraph produced no extended contigs (0-byte extendedContig)."
                 echo "      The pipeline automatically used remainingContig for QUAST/BUSCO."
                 echo "      This indicates the de novo assembly was already complete"
@@ -832,7 +878,7 @@ main() {
     CURRENT_DIR=$(pwd)
 
     if [[ -n "$RESUME_DIR" ]]; then
-        WORK_DIR="$RESUME_DIR"
+        WORK_DIR="$(cd "$RESUME_DIR" && pwd -P)" || die "Cannot resolve resume directory: $RESUME_DIR"
     else
         WORK_DIR="$CURRENT_DIR/assembly_pipeline_$(date +%Y%m%d_%H%M%S)"
     fi
@@ -875,8 +921,8 @@ main() {
     run_step "04_flash"        run_flash
     run_step "05_unicycler"    run_unicycler
     run_step "06_quast_denovo" run_quast "de-novo" \
-        "$WORK_DIR/unicycler_out/assembly/assembly.fasta" \
-        "$WORK_DIR/quast_out"
+        "$WORK_DIR/quast_out" \
+        "$WORK_DIR/unicycler_out/assembly/assembly.fasta"
 
     log "Phase 1 complete."
 
@@ -892,29 +938,38 @@ main() {
     run_step "08_bowtie2"      run_bowtie2
     run_step "09_aligngraph"   run_aligngraph
 
-    # After AlignGraph: if we skipped it (checkpoint present), recompute status
+    # After AlignGraph: if skipped (checkpoint present), recompute status
     if step_done "09_aligngraph" && [[ "$ALIGNGRAPH_STATUS" == "not run" ]]; then
-        local ext="$WORK_DIR/reference_based_assembly/sample_extendedcontig.fasta"
-        local rem="$WORK_DIR/reference_based_assembly/sample_remainingcontig.fasta"
-        if [[ -s "$ext" ]]; then
+        local ext_status="$WORK_DIR/reference_based_assembly/sample_extendedcontig.fasta"
+        local rem_status="$WORK_DIR/reference_based_assembly/sample_remainingcontig.fasta"
+        if [[ -s "$ext_status" && -s "$rem_status" ]]; then
             ALIGNGRAPH_STATUS="OK"
-            ALIGNGRAPH_USED_FILE="$ext"
-        elif [[ -s "$rem" ]]; then
+            ALIGNGRAPH_USED_FILE="$ext_status + $rem_status (merged)"
+        elif [[ -s "$ext_status" ]]; then
+            ALIGNGRAPH_STATUS="OK"
+            ALIGNGRAPH_USED_FILE="$ext_status"
+        elif [[ -s "$rem_status" ]]; then
             ALIGNGRAPH_STATUS="FALLBACK"
-            ALIGNGRAPH_USED_FILE="$rem"
+            ALIGNGRAPH_USED_FILE="$rem_status"
         fi
     fi
 
-    # Choose ref-guided input for QUAST
-    local refguided_input="$WORK_DIR/reference_based_assembly/sample_extendedcontig.fasta"
-    if [[ ! -s "$refguided_input" ]]; then
-        refguided_input="$WORK_DIR/reference_based_assembly/sample_remainingcontig.fasta"
-        [[ -s "$refguided_input" ]] || refguided_input="$WORK_DIR/unicycler_out/assembly/assembly.fasta"
+    # ---- Ref-guided QUAST: merge extended + remaining into ONE file ----
+    local ref_ext="$WORK_DIR/reference_based_assembly/sample_extendedcontig.fasta"
+    local ref_rem="$WORK_DIR/reference_based_assembly/sample_remainingcontig.fasta"
+    local merged_asm="$WORK_DIR/reference_based_assembly/complete_assembly_for_quast.fasta"
+
+    if [[ -s "$ref_ext" || -s "$ref_rem" ]]; then
+        merge_aligngraph_outputs "$ref_ext" "$ref_rem" "$merged_asm"
+        log "Merged ref-guided assembly: $merged_asm ($(grep -c '^>' "$merged_asm") contigs, $(awk '/^>/{next}{s+=length}END{print s}' "$merged_asm") bp)"
+    else
+        merged_asm="$WORK_DIR/unicycler_out/assembly/assembly.fasta"
+        log "Merged ref-guided assembly (fallback to de-novo): $merged_asm"
     fi
 
     run_step "10_quast_refguided" run_quast "reference-guided" \
-        "$refguided_input" \
-        "$WORK_DIR/quast2_out"
+        "$WORK_DIR/quast2_out" \
+        "$merged_asm"
 
     run_step "11_busco" run_busco
 
