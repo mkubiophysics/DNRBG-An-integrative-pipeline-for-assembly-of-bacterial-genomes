@@ -2,430 +2,391 @@
 
 nextflow.enable.dsl=2
 
-// Define parameters read1 and read2
-params.forward_read = null
-params.reverse_read = null
-
-// Define parameters for trimmomatic
-params.thread = 4
-params.phred = 33
-params.PATH_TO_ADAPTER_CONTAM_FILE = 'Path/to/your/adapter/file'
-params.leading = 3
-params.trailing = 3
+// ============================================================
+// Parameters
+// ============================================================
+params.forward_read  = null
+params.reverse_read  = null
+params.thread        = 4
+params.phred         = 33
+params.PATH_TO_ADAPTER_CONTAM_FILE = null
+params.leading       = 3
+params.trailing      = 3
 params.slidingwindow = '4:15'
-params.minlength = 36
+params.minlength     = 36
+params.max_overlap   = 10
+params.assembler     = 'skesa'
+params.reference_genome = null
+params.pad_read_path = null
+params.pad_read_len  = 150
+params.distancelow   = 200
+params.distancehigh  = 1000
+params.busco_lineage = 'bacteria_odb10'
+params.align_threshold = 75
+params.outdir        = "results"
 
-// Define parameters for flash
-params.max_overlap = 150
+// ============================================================
+// PHASE 1
+// ============================================================
 
-// Define parameters for plentyofbugs
-params.assembler = 'path/to/skesa'
-params.reference_genome = 'path/to/your/reference/genome/dir'
-
-// Define input parameter path for pad reads
-params.pad_read_path = 'path/to/your/pad_reads.py'
-
-// Define input parameters for AlignGraph
-params.distancelow = 200
-params.distancehigh = 1000
-
-// Define input parameters for quast2 (add this with your other params)
-params.minContigLength = 500
-
-// Define output directories
-params.outputDir1 = "fastqc_out"
-params.outputDir2 = "multiqc_out"
-params.outputDir3 = "trimmomatic_out"
-params.outputDir4 = "flash_out"
-params.outputDir5 = "unicycler_out"
-params.outputDir6 = "quast_out"
-params.outputDir7 = "plentyofbugs_out"
-params.outputDir8 = "bowtie2_out"
-params.outputDir9 = "reference_based_assembly"
-params.outputDir10 = "busco_out"
-
-// Define the first process (FastQC)
-process fastqc {
+process FASTQC {
+    publishDir "${params.outdir}/fastqc_out", mode: 'copy'
     input:
-    path forward_read
-    path reverse_read
-
+    path fwd
+    path rev
     output:
-    path "${params.outputDir1}", emit: fastqc_out
-
+    path "fastqc_out", emit: out_dir
     script:
     """
-    mkdir -p ${params.outputDir1}
-    fastqc -o ${params.outputDir1} -f fastq "$forward_read" "$reverse_read"
+    mkdir -p fastqc_out
+    fastqc -o fastqc_out -f fastq -t ${params.thread} ${fwd} ${rev}
     """
 }
 
-// Define the second process (MultiQC)
-process multiqc {
+process MULTIQC {
+    publishDir "${params.outdir}/multiqc_out", mode: 'copy'
     input:
     path fastqc_out
-
     output:
-    path "${params.outputDir2}", emit: multiqc_out
-
+    path "multiqc_out", emit: out_dir
     script:
     """
-    mkdir -p ${params.outputDir2}
-    multiqc ${fastqc_out} -o ${params.outputDir2}
+    mkdir -p multiqc_out
+    multiqc ${fastqc_out} -o multiqc_out
     """
 }
 
-// Define the third process (Trimmomatic)
-process trimmomatic {
+process TRIMMOMATIC {
+    publishDir "${params.outdir}/trimmomatic_out", mode: 'copy'
     input:
-    path forward_read
-    path reverse_read
-    val thread
-    val phred
-    path PATH_TO_ADAPTER_CONTAM_FILE
-    val leading
-    val trailing
-    val slidingwindow
-    val minlength
-
+    path fwd
+    path rev
+    val  adapter_path
     output:
-    path "${params.outputDir3}", emit: trimmomatic_out
-
+    path "trimmomatic_out", emit: trim_out
     script:
+    def adapter_clip = adapter_path ? "ILLUMINACLIP:${adapter_path}:2:30:10" : ""
     """
-    mkdir -p ${params.outputDir3}
-    trimmomatic PE -threads ${thread} -phred${phred} "$forward_read" "$reverse_read" \
-        ${params.outputDir3}/output_1P.fq ${params.outputDir3}/output_1U.fq \
-        ${params.outputDir3}/output_2P.fq ${params.outputDir3}/output_2U.fq \
-        ILLUMINACLIP:${PATH_TO_ADAPTER_CONTAM_FILE}:2:30:10 LEADING:${leading} \
-        TRAILING:${trailing} SLIDINGWINDOW:${slidingwindow} MINLEN:${minlength}
+    mkdir -p trimmomatic_out
+    trimmomatic PE -threads ${params.thread} -phred${params.phred} \\
+        ${fwd} ${rev} \\
+        trimmomatic_out/output_1P.fq trimmomatic_out/output_1U.fq \\
+        trimmomatic_out/output_2P.fq trimmomatic_out/output_2U.fq \\
+        ${adapter_clip} \\
+        LEADING:${params.leading} \\
+        TRAILING:${params.trailing} \\
+        SLIDINGWINDOW:${params.slidingwindow} \\
+        MINLEN:${params.minlength}
     """
 }
 
-// Define the fourth process (FLASH)
-process flash {
+process FLASH {
+    publishDir "${params.outdir}/flash_out", mode: 'copy'
     input:
-    path trimmomatic_out
-    val max_overlap
-
+    path trim_out
     output:
-    path "${params.outputDir4}", emit: flash_out
-
+    path "flash_out", emit: flash_out
     script:
     """
-    mkdir -p ${params.outputDir4}
-    flash --max-overlap ${max_overlap} \
-        ${trimmomatic_out}/output_1P.fq ${trimmomatic_out}/output_2P.fq \
-        -d ${params.outputDir4}
+    mkdir -p flash_out
+    flash --max-overlap ${params.max_overlap} --threads ${params.thread} \\
+        --output-prefix out \\
+        --output-directory flash_out \\
+        ${trim_out}/output_1P.fq \\
+        ${trim_out}/output_2P.fq
     """
 }
 
-// Define the fifth process (Unicycler)
-process unicycler {
+process UNICYCLER {
+    publishDir "${params.outdir}/unicycler_out", mode: 'copy'
     input:
-    path trimmomatic_out
     path flash_out
-
     output:
-    path "${params.outputDir5}/assembly.fasta", emit: assembly_file
-
+    path "unicycler_out", emit: unicycler_out
     script:
     """
-    mkdir -p ${params.outputDir5}
-    unicycler -1 ${trimmomatic_out}/output_1P.fq -2 ${trimmomatic_out}/output_2P.fq \
-        -s ${flash_out}/out.extendedFrags.fastq -o ${params.outputDir5}
+    mkdir -p unicycler_out
+    unicycler \\
+        -1 ${flash_out}/out.notCombined_1.fastq \\
+        -2 ${flash_out}/out.notCombined_2.fastq \\
+        -s ${flash_out}/out.extendedFrags.fastq \\
+        -t ${params.thread} \\
+        -o unicycler_out/assembly
     """
 }
 
-// Define the sixth process (Quast)
-process quast {
+process QUAST_DENOVO {
+    publishDir "${params.outdir}/quast_out", mode: 'copy'
     input:
-    path assembly_file
-
+    path unicycler_out
     output:
-    path "${params.outputDir6}", emit: quast_out
-
+    path "quast_out", emit: quast_out
     script:
     """
-    mkdir -p ${params.outputDir6}
-    quast.py -o ${params.outputDir6} ${assembly_file}
+    quast -o quast_out -t ${params.thread} --min-contig 0 \\
+        ${unicycler_out}/assembly/assembly.fasta
     """
 }
 
-// Define plentyofbugs
-process plentyofbugs {
+// ============================================================
+// PHASE 2
+// ============================================================
+
+process PLENTYOFBUGS {
+    publishDir "${params.outdir}/plentyofbugs_out", mode: 'copy'
     input:
-    path quast_out
-    path assembler
-    path reference_genome
-    path trimmomatic_out
-
+    path trim_out
+    val  assembler
+    val  reference_dir
     output:
-    path "${params.outputDir7}/best_reference", emit: best_reference
-    path "${params.outputDir7}/assembly/contigs.fasta", emit: contigs_file
-
+    path "plentyofbugs_out", emit: pob_out
     script:
     """
-    plentyofbugs --assembler ${assembler} \
-        -f ${trimmomatic_out}/output_1P.fq \
-        -r ${trimmomatic_out}/output_2P.fq \
-        -g ${reference_genome} \
-        -o ${params.outputDir7}
+    plentyofbugs --assembler ${assembler} \\
+        -f ${trim_out}/output_1P.fq \\
+        -r ${trim_out}/output_2P.fq \\
+        -g ${reference_dir} \\
+        -o plentyofbugs_out
     """
 }
 
-// Define process bowtie2_build
-process bowtie2_build {
+process BOWTIE2_BUILD {
+    publishDir "${params.outdir}/bowtie2_out", mode: 'copy'
     input:
-    path best_reference
-    path reference_genome
-
+    path pob_out
+    val  reference_dir
     output:
-    path "${params.outputDir8}/reference_index*", emit: bowtie2_index
-
+    path "bt2_index",           emit: index
+    path "best_reference.txt",  emit: best_ref
     script:
     """
-    mkdir -p ${params.outputDir8}
-    best_genome=\$(awk '{gsub(/.*\\//, ""); print \$1}' "${best_reference}")
-    genome_file="${reference_genome}/\${best_genome}"
-    bowtie2-build -f "\${genome_file}" "${params.outputDir8}/reference_index"
-    """
-}
-
-// Define process bowtie2
-process bowtie2 {
-    input:
-    path bowtie2_index
-    path trimmomatic_out
-
-    output:
-    path "${params.outputDir8}/out.sam", emit: sam_file
-
-    script:
-    """
-    mkdir -p ${params.outputDir8}
-    indexPath=\$(find -L ${bowtie2_index} -type f -name '*.rev.1.bt2' | sed 's/\\.rev.1.bt2\$//')
-    echo "Using index path: \${indexPath}"
-    bowtie2 -x \${indexPath} \
-            -1 ${trimmomatic_out}/output_1P.fq \
-            -2 ${trimmomatic_out}/output_2P.fq \
-            -S "${params.outputDir8}/out.sam"
-    """
-}
-
-// Define the process for seqtk
-process seqtk {
-    input:
-    path sam_file
-    path trimmomatic_out
-
-    output:
-    path "${params.outputDir9}/paired_forward_1.fa", emit: forward_fa
-    path "${params.outputDir9}/paired_forward_2.fa", emit: reverse_fa
-
-    script:
-    """
-    mkdir -p ${params.outputDir9}
-    seqtk seq -A ${trimmomatic_out}/output_1P.fq > ${params.outputDir9}/paired_forward_1.fa
-    seqtk seq -A ${trimmomatic_out}/output_2P.fq > ${params.outputDir9}/paired_forward_2.fa
-    """
-}
-
-// Define process for pad read
-process pad_read {
-    input:
-    path forward_fa
-    path reverse_fa
-    path pad_read_path
-
-    output:
-    path "${params.outputDir9}/padded_out1.fa", emit: padded_file1
-    path "${params.outputDir9}/padded_out2.fa", emit: padded_file2
-
-    script:
-    """
-    mkdir -p ${params.outputDir9}
-    python ${pad_read_path} ${forward_fa} ${params.outputDir9}/padded_out1.fa 150
-    python ${pad_read_path} ${reverse_fa} ${params.outputDir9}/padded_out2.fa 150
-    """
-}
-
-// Define the process for AlignGraph
-process AlignGraph {
-    input:
-    path best_reference
-    path reference_genome
-    path padded_file1
-    path padded_file2
-    path assembly_file
-    val distancelow
-    val distancehigh
-
-    output:
-    path "${params.outputDir9}/sample_extendedcontig.fasta", emit: extended_contigs
-    path "${params.outputDir9}/sample_remainingcontig.fasta", emit: remaining_contigs
-
-    script:
-    """
-    # Create output directory
-    mkdir -p ${params.outputDir9}
-
-    # Resolve the genome file path properly
-    best_genome=\$(awk '{gsub(/.*\\//, ""); print \$1}' "${best_reference}")
-    genome_path="\$(readlink -f "${reference_genome}/\${best_genome}")"
-
-    if [ ! -f "\${genome_path}" ]; then
-        echo "ERROR: Genome file not found at \${genome_path}"
-        echo "Tried to resolve: ${reference_genome}/\${best_genome}"
-        echo "Directory contents:"
-        ls -l "${reference_genome}"
-        exit 1
+    mkdir -p bt2_index
+    best_ref=\$(awk 'NR==1 {print \$1}' ${pob_out}/best_reference)
+    if [ ! -f "\$best_ref" ]; then
+        best_ref="${reference_dir}/\$(basename "\$best_ref")"
     fi
+    echo "\$best_ref" > best_reference.txt
+    bowtie2-build -f "\$best_ref" bt2_index/reference_index
+    """
+}
 
-    echo "Using genome file: \${genome_path}"
+process BOWTIE2_ALIGN {
+    publishDir "${params.outdir}/bowtie2_out", mode: 'copy'
+    input:
+    path bt2_index
+    path trim_out
+    output:
+    path "out.sam",            emit: sam
+    path "alignment_rate.txt", emit: rate
+    script:
+    """
+    bowtie2 -p ${params.thread} \\
+        -x ${bt2_index}/reference_index \\
+        -1 ${trim_out}/output_1P.fq \\
+        -2 ${trim_out}/output_2P.fq \\
+        -S out.sam
+
+    total=\$(samtools view -S -c out.sam)
+    aligned=\$(samtools view -S -F 4 -c out.sam)
+    rate=\$(awk -v a="\$aligned" -v t="\$total" \\
+        'BEGIN {if(t>0) printf "%.2f", (a/t)*100; else print "0.00"}')
+    {
+        echo "total=\$total"
+        echo "aligned=\$aligned"
+        echo "rate=\$rate"
+    } > alignment_rate.txt
+    echo "Alignment rate: \$rate% (threshold: ${params.align_threshold}%)"
+    """
+}
+
+process CHECK_ALIGNMENT {
+    publishDir "${params.outdir}/bowtie2_out", mode: 'copy'
+    input:
+    path rate_file
+    output:
+    path "alignment_check.txt", emit: check
+    script:
+    """
+    rate=\$(grep '^rate=' ${rate_file} | cut -d= -f2)
+    if awk -v r="\$rate" -v t="${params.align_threshold}" 'BEGIN {exit !(r >= t)}'; then
+        echo "PASS: rate \$rate% >= threshold ${params.align_threshold}%" > alignment_check.txt
+    else
+        echo "WARN: rate \$rate% < threshold ${params.align_threshold}% - continuing anyway" > alignment_check.txt
+    fi
+    cat alignment_check.txt
+    """
+}
+
+process SEQTK {
+    publishDir "${params.outdir}/reference_based_assembly", mode: 'copy'
+    input:
+    path trim_out
+    output:
+    path "seqtk_out", emit: seqtk_out
+    script:
+    """
+    mkdir -p seqtk_out
+    seqtk seq -A ${trim_out}/output_1P.fq > seqtk_out/output_1P.fa
+    seqtk seq -A ${trim_out}/output_2P.fq > seqtk_out/output_2P.fa
+    """
+}
+
+process PAD_READ {
+    publishDir "${params.outdir}/reference_based_assembly", mode: 'copy'
+    input:
+    path seqtk_out
+    path pad_script
+    output:
+    path "padded_out1.fa", emit: padded1
+    path "padded_out2.fa", emit: padded2
+    script:
+    """
+    python ${pad_script} ${seqtk_out}/output_1P.fa padded_out1.fa ${params.pad_read_len}
+    python ${pad_script} ${seqtk_out}/output_2P.fa padded_out2.fa ${params.pad_read_len}
+    """
+}
+
+process ALIGNGRAPH {
+    publishDir "${params.outdir}/reference_based_assembly", mode: 'copy'
+    input:
+    path pob_out
+    path unicycler_out
+    path padded1
+    path padded2
+    val  reference_dir
+    output:
+    path "sample_extendedcontig.fasta",  emit: extended
+    path "sample_remainingcontig.fasta", emit: remaining
+    script:
+    """
+    best_ref=\$(awk 'NR==1 {print \$1}' ${pob_out}/best_reference)
+    if [ ! -f "\$best_ref" ]; then
+        best_ref="${reference_dir}/\$(basename "\$best_ref")"
+    fi
     AlignGraph \\
-        --read1 "${padded_file1}" \\
-        --read2 "${padded_file2}" \\
-        --contig "${assembly_file}" \\
-        --genome "\${genome_path}" \\
-        --distanceLow ${distancelow} \\
-        --distanceHigh ${distancehigh} \\
-        --extendedContig "${params.outputDir9}/sample_extendedcontig.fasta" \\
-        --remainingContig "${params.outputDir9}/sample_remainingcontig.fasta"
+        --read1 ${padded1} \\
+        --read2 ${padded2} \\
+        --contig ${unicycler_out}/assembly/assembly.fasta \\
+        --genome "\$best_ref" \\
+        --distanceLow ${params.distancelow} \\
+        --distanceHigh ${params.distancehigh} \\
+        --extendedContig sample_extendedcontig.fasta \\
+        --remainingContig sample_remainingcontig.fasta
     """
 }
 
-// Define the process for quast2 (final Quast)
-process quast2 {
+// ============================================================
+// MERGE: extended + remaining → one complete assembly file
+// ============================================================
+process MERGE_ALIGNGRAPH {
+    publishDir "${params.outdir}/reference_based_assembly", mode: 'copy'
     input:
-    path extended_contigs
-    path remaining_contigs
-    val min_length
-
+    path extended
+    path remaining
+    path unicycler_out
     output:
-    path "${params.outputDir9}/quast_output", emit: quast2_out
-
+    path "complete_assembly.fasta", emit: complete
+    path "merge_report.txt",        emit: report
     script:
     """
-     mkdir -p ${params.outputDir9}/quast_output
-
-    # Check if extended_contigs exists AND has at least one contig
-    if [[ -s "${extended_contigs}" ]] && grep -q ">" "${extended_contigs}"; then
-        quast.py -o ${params.outputDir9}/quast_output --min-contig ${min_length} "${extended_contigs}"
+    # Merge extended + remaining into one complete assembly
+    if [ -s ${extended} ] && [ -s ${remaining} ]; then
+        cat ${extended} ${remaining} > complete_assembly.fasta
+        echo "STATUS=OK"                                > merge_report.txt
+        echo "MODE=extended+remaining"                  >> merge_report.txt
+        echo "Extended contigs: \$(grep -c '^>' ${extended})"   >> merge_report.txt
+        echo "Remaining contigs: \$(grep -c '^>' ${remaining})"  >> merge_report.txt
+    elif [ -s ${extended} ]; then
+        cp ${extended} complete_assembly.fasta
+        echo "STATUS=EXTENDED_ONLY"                     > merge_report.txt
+        echo "MODE=extended_only"                       >> merge_report.txt
+    elif [ -s ${remaining} ]; then
+        cp ${remaining} complete_assembly.fasta
+        echo "STATUS=REMAINING_ONLY"                    > merge_report.txt
+        echo "MODE=remaining_only"                      >> merge_report.txt
     else
-        echo "WARNING: Using remaining_contigs (extended_contigs was empty/invalid)"
-        quast.py -o ${params.outputDir9}/quast_output --min-contig ${min_length} "${remaining_contigs}"
+        cp ${unicycler_out}/assembly/assembly.fasta complete_assembly.fasta
+        echo "STATUS=DENOVO_FALLBACK"                   > merge_report.txt
+        echo "MODE=de_novo_fallback"                    >> merge_report.txt
     fi
+
+    echo "Total contigs: \$(grep -c '^>' complete_assembly.fasta)" >> merge_report.txt
+    echo "Total bp: \$(awk '/^>/{next}{s+=length}END{print s}' complete_assembly.fasta)" >> merge_report.txt
+    cat merge_report.txt
     """
 }
 
-process busco {
-    // Simple process with direct BUSCO execution
-    cpus 4  // Sets default CPU count
-
+process QUAST_REFGUIDED {
+    publishDir "${params.outdir}/quast2_out", mode: 'copy'
     input:
-    path extended_contigs
-    path remaining_contigs
-
+    path complete_asm
     output:
-    path "busco_output/*", emit: busco_results
-    path "busco_output/short_summary.*.txt", emit: summary
-
+    path "quast_out", emit: quast_out
     script:
     """
-    # Select input file (extended contigs preferred)
-    if [[ -s "${extended_contigs}" ]] && grep -q ">" "${extended_contigs}"; then
-        INPUT="${extended_contigs}"
-        echo "Using extended contigs as input"
-    else
-        INPUT="${remaining_contigs}"
-        echo "Using remaining contigs as input"
-        [[ -s "\$INPUT" ]] || { echo "ERROR: No valid input files"; exit 1; }
-    fi
-
-    # Run BUSCO
-    busco \\
-        -i "\$INPUT" \\
-        -o busco_output \\
-        -l bacteria_odb10 \\
-        -m genome \\
-        -c ${task.cpus} \\
-        --force
+    quast -o quast_out -t ${params.thread} --min-contig 0 ${complete_asm}
     """
 }
+
+process BUSCO {
+    publishDir "${params.outdir}/busco_out", mode: 'copy'
+    input:
+    path complete_asm
+    output:
+    path "busco_out", emit: busco_out
+    script:
+    """
+    mkdir -p busco_out
+    busco -i ${complete_asm} -m genome -l ${params.busco_lineage} \\
+        -c ${params.thread} -o busco_run --out_path busco_out
+    """
+}
+
+// ============================================================
+// WORKFLOW
+// ============================================================
 
 workflow {
-    // Run fastqc and get the output
-    fastqc_ch = fastqc(params.forward_read, params.reverse_read)
+    if (!params.forward_read)     error("--forward_read is required")
+    if (!params.reverse_read)     error("--reverse_read is required")
+    if (!params.reference_genome) error("--reference_genome is required")
+    if (!params.pad_read_path)    error("--pad_read_path is required")
 
-    // Run MultiQC on the FastQC output directory
-    multiqc_ch = multiqc(fastqc_ch.fastqc_out)
+    fwd        = file(params.forward_read,  checkIfExists: true)
+    rev        = file(params.reverse_read,  checkIfExists: true)
+    pad_script = file(params.pad_read_path, checkIfExists: true)
 
-    // Run trimmomatic
-    trimmomatic_ch = trimmomatic(
-        params.forward_read,
-        params.reverse_read,
-        params.thread,
-        params.phred,
-        params.PATH_TO_ADAPTER_CONTAM_FILE,
-        params.leading,
-        params.trailing,
-        params.slidingwindow,
-        params.minlength
-    )
+    // Phase 1
+    FASTQC(fwd, rev)
+    MULTIQC(FASTQC.out.out_dir)
+    TRIMMOMATIC(fwd, rev, params.PATH_TO_ADAPTER_CONTAM_FILE)
+    FLASH(TRIMMOMATIC.out.trim_out)
+    UNICYCLER(FLASH.out.flash_out)
+    QUAST_DENOVO(UNICYCLER.out.unicycler_out)
 
-    // Run flash
-    flash_ch = flash(trimmomatic_ch.trimmomatic_out, params.max_overlap)
-
-    // Run unicycler
-    unicycler_ch = unicycler(trimmomatic_ch.trimmomatic_out, flash_ch.flash_out)
-
-    // Run quast
-    quast_ch = quast(unicycler_ch.assembly_file)
-
-    // Run plentyofbugs
-    plentyofbugs_ch = plentyofbugs(
-        quast_ch.quast_out,
-        params.assembler,
-        params.reference_genome,
-        trimmomatic_ch.trimmomatic_out
-    )
-
-    // Run bowtie2_build process
-    bowtie2_build_ch = bowtie2_build(
-        plentyofbugs_ch.best_reference,
+    // Phase 2
+    PLENTYOFBUGS(TRIMMOMATIC.out.trim_out, params.assembler, params.reference_genome)
+    BOWTIE2_BUILD(PLENTYOFBUGS.out.pob_out, params.reference_genome)
+    BOWTIE2_ALIGN(BOWTIE2_BUILD.out.index, TRIMMOMATIC.out.trim_out)
+    CHECK_ALIGNMENT(BOWTIE2_ALIGN.out.rate)
+    SEQTK(TRIMMOMATIC.out.trim_out)
+    PAD_READ(SEQTK.out.seqtk_out, pad_script)
+    ALIGNGRAPH(
+        PLENTYOFBUGS.out.pob_out,
+        UNICYCLER.out.unicycler_out,
+        PAD_READ.out.padded1,
+        PAD_READ.out.padded2,
         params.reference_genome
     )
 
-    // Run bowtie2 process
-    bowtie2_ch = bowtie2(
-        bowtie2_build_ch.bowtie2_index,
-        trimmomatic_ch.trimmomatic_out
+    // Merge extended + remaining → complete assembly
+    MERGE_ALIGNGRAPH(
+        ALIGNGRAPH.out.extended,
+        ALIGNGRAPH.out.remaining,
+        UNICYCLER.out.unicycler_out
     )
 
-    // Run seqtk
-    seqtk_ch = seqtk(bowtie2_ch.sam_file, trimmomatic_ch.trimmomatic_out)
-
-    // Run the pad_read process
-    pad_read_ch = pad_read(
-        seqtk_ch.forward_fa,
-        seqtk_ch.reverse_fa,
-        params.pad_read_path
-    )
-
-    // Run AlignGraph
-    aligngraph_ch = AlignGraph(
-        plentyofbugs_ch.best_reference,
-        params.reference_genome,
-        pad_read_ch.padded_file1,
-        pad_read_ch.padded_file2,
-        unicycler_ch.assembly_file,
-        params.distancelow,
-        params.distancehigh
-    )
-
-    // Run quast2 for AlignGraph
-    quast2_ch = quast2(aligngraph_ch.extended_contigs, aligngraph_ch.remaining_contigs, params.minContigLength)
-
-    // Run busco
-    busco_ch = busco(aligngraph_ch.extended_contigs, aligngraph_ch.remaining_contigs)
+    // QUAST + BUSCO on merged complete assembly
+    QUAST_REFGUIDED(MERGE_ALIGNGRAPH.out.complete)
+    BUSCO(MERGE_ALIGNGRAPH.out.complete)
+}
